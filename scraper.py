@@ -71,42 +71,6 @@ def parse_data_it(testo: str) -> str | None:
     return None
 
 
-def parse_intervallo_data(testo: str) -> tuple[str | None, str | None]:
-    """
-    Parsa intervalli di date come "Dal 10/04/2026 al 20/04/2026"
-    Restituisce (data_inizio, data_fine) in formato YYYY-MM-DD
-    """
-    if not testo:
-        return None, None
-    
-    # Pattern per "Dal DD/MM/YYYY al DD/MM/YYYY"
-    pattern = r"[Dd]al\s+(\d{1,2}/\d{1,2}/\d{4})\s+[Aa]l\s+(\d{1,2}/\d{1,2}/\d{4})"
-    m = re.search(pattern, testo)
-    if m:
-        inizio = parse_data_it(m.group(1))
-        fine = parse_data_it(m.group(2))
-        return inizio, fine
-    
-    # Pattern per "Dal DD/MM/YYYY"
-    pattern_singolo = r"[Dd]al\s+(\d{1,2}/\d{1,2}/\d{4})"
-    m = re.search(pattern_singolo, testo)
-    if m:
-        return parse_data_it(m.group(1)), None
-    
-    return None, None
-
-
-def data_in_intervallo(data: str, inizio: str | None, fine: str | None) -> bool:
-    """Verifica se una data è compresa nell'intervallo"""
-    if not data or not inizio:
-        return False
-    
-    if fine:
-        return inizio <= data <= fine
-    else:
-        return data == inizio
-
-
 def get(url: str) -> BeautifulSoup | None:
     try:
         r = requests.get(url, headers=HEADERS, timeout=15)
@@ -115,6 +79,102 @@ def get(url: str) -> BeautifulSoup | None:
     except Exception as e:
         print(f"  [ERRORE] {url} -> {e}")
         return None
+
+
+def scrape_genovatoday(filtro: str = None, data_inizio: str = None, data_fine: str = None) -> list[dict]:
+    """
+    GenovaToday con filtro date via URL
+    Filtri disponibili:
+    - "oggi": eventi di oggi
+    - "domani": eventi di domani  
+    - "weekend": eventi del weekend
+    - "settimana": eventi di questa settimana
+    - "prossima_settimana": eventi della prossima settimana
+    - "mese": eventi di questo mese
+    Oppure usa data_inizio e data_fine in formato YYYY-MM-DD
+    """
+    eventi = []
+    
+    # Costruisci l'URL con il filtro appropriato
+    if filtro:
+        oggi = date.today()
+        if filtro == "oggi":
+            url = f"https://www.genovatoday.it/eventi/dal/{oggi.isoformat()}/al/{oggi.isoformat()}/"
+        elif filtro == "domani":
+            domani = oggi + timedelta(days=1)
+            url = f"https://www.genovatoday.it/eventi/dal/{domani.isoformat()}/al/{domani.isoformat()}/"
+        elif filtro == "weekend":
+            giorni_a_sab = (5 - oggi.weekday()) % 7 or 7
+            sabato = oggi + timedelta(days=giorni_a_sab)
+            domenica = sabato + timedelta(days=1)
+            url = f"https://www.genovatoday.it/eventi/dal/{sabato.isoformat()}/al/{domenica.isoformat()}/"
+        elif filtro == "settimana":
+            lunedi = oggi - timedelta(days=oggi.weekday())
+            domenica = lunedi + timedelta(days=6)
+            url = f"https://www.genovatoday.it/eventi/dal/{lunedi.isoformat()}/al/{domenica.isoformat()}/"
+        elif filtro == "prossima_settimana":
+            lunedi_prossimo = oggi + timedelta(days=(7 - oggi.weekday()))
+            domenica_prossima = lunedi_prossimo + timedelta(days=6)
+            url = f"https://www.genovatoday.it/eventi/dal/{lunedi_prossimo.isoformat()}/al/{domenica_prossima.isoformat()}/"
+        elif filtro == "mese":
+            primo_del_mese = oggi.replace(day=1)
+            if oggi.month == 12:
+                ultimo_del_mese = oggi.replace(year=oggi.year+1, month=1, day=1) - timedelta(days=1)
+            else:
+                ultimo_del_mese = oggi.replace(month=oggi.month+1, day=1) - timedelta(days=1)
+            url = f"https://www.genovatoday.it/eventi/dal/{primo_del_mese.isoformat()}/al/{ultimo_del_mese.isoformat()}/"
+        else:
+            url = "https://www.genovatoday.it/eventi/"
+    elif data_inizio and data_fine:
+        url = f"https://www.genovatoday.it/eventi/dal/{data_inizio}/al/{data_fine}/"
+    else:
+        url = "https://www.genovatoday.it/eventi/"
+    
+    print(f"  -> GenovaToday: {url}")
+    soup = get(url)
+    if not soup:
+        return eventi
+
+    # Estrai gli eventi dalla pagina filtrata
+    articles = soup.find_all("article")
+
+    for article in articles:
+        link_el = article.find("a", href=True)
+        titolo_el = article.find(["h2", "h3"])
+        if not link_el or not titolo_el:
+            continue
+
+        titolo = titolo_el.get_text(strip=True)
+        if not titolo:
+            continue
+
+        href = link_el["href"]
+        if not href.startswith("http"):
+            href = "https://www.genovatoday.it" + href
+
+        # La data è già implicita nel filtro, ma la prendiamo dal testo se disponibile
+        time_el = article.find("time")
+        data_raw = ""
+        data_parsata = None
+        if time_el:
+            data_raw = time_el.get("datetime", "") or time_el.get_text(strip=True)
+            data_parsata = parse_data_it(data_raw) if data_raw else None
+
+        luogo_el = article.find(class_=re.compile(r"location|place|luogo", re.I))
+        luogo = luogo_el.get_text(strip=True) if luogo_el else "Genova"
+
+        eventi.append({
+            "titolo": titolo,
+            "data": data_parsata,
+            "data_raw": data_raw,
+            "luogo": luogo,
+            "url": href,
+            "fonte": "genovatoday.it",
+            "scraped_at": datetime.now().isoformat(),
+        })
+
+    print(f"  GenovaToday: {len(eventi)} eventi trovati")
+    return eventi
 
 
 def scrape_mentelocale() -> list[dict]:
@@ -129,7 +189,9 @@ def scrape_mentelocale() -> list[dict]:
     if not soup:
         return eventi
 
-    # Ogni evento e' un link a /genova/NUMERO-titolo.htm
+    pattern_intervallo = re.compile(r"[Dd]al\s+(\d{1,2}/\d{1,2}/\d{4})\s+[Aa]l\s+(\d{1,2}/\d{1,2}/\d{4})")
+    pattern_singolo = re.compile(r"[Dd]al\s+(\d{1,2}/\d{1,2}/\d{4})")
+
     seen_urls = set()
     for a in soup.find_all("a", href=re.compile(r"/genova/\d+-.+\.htm")):
         href = a["href"]
@@ -143,7 +205,6 @@ def scrape_mentelocale() -> list[dict]:
         if not titolo or len(titolo) < 5:
             continue
 
-        # cerca data nel testo del contenitore padre
         testo = ""
         parent = a.parent
         for _ in range(5):
@@ -151,15 +212,31 @@ def scrape_mentelocale() -> list[dict]:
                 testo = parent.get_text(" ", strip=True)
                 parent = parent.parent
 
-        # Parsa intervallo date
-        data_inizio, data_fine = parse_intervallo_data(testo)
+        m_intervallo = pattern_intervallo.search(testo)
+        if m_intervallo:
+            data_inizio_str = m_intervallo.group(1)
+            data_fine_str = m_intervallo.group(2)
+            data_inizio = parse_data_it(data_inizio_str)
+            data_fine = parse_data_it(data_fine_str)
+            data_raw = f"Dal {data_inizio_str} al {data_fine_str}"
+        else:
+            m_singolo = pattern_singolo.search(testo)
+            if m_singolo:
+                data_inizio_str = m_singolo.group(1)
+                data_inizio = parse_data_it(data_inizio_str)
+                data_fine = None
+                data_raw = f"Dal {data_inizio_str}"
+            else:
+                data_inizio = None
+                data_fine = None
+                data_raw = ""
 
         eventi.append({
             "titolo": titolo,
-            "data": data_inizio,  # per compatibilità
+            "data": data_inizio,
             "data_inizio": data_inizio,
             "data_fine": data_fine,
-            "data_raw": testo[:100] if testo else "",
+            "data_raw": data_raw,
             "luogo": "Genova",
             "url": href,
             "fonte": "mentelocale.it",
@@ -170,70 +247,11 @@ def scrape_mentelocale() -> list[dict]:
     return eventi
 
 
-def scrape_genovatoday(max_pagine: int = 3) -> list[dict]:
-    """
-    GenovaToday usa Citynews: articoli <article> con h2/h3 + <time datetime="...">
-    """
-    eventi = []
-    base = "https://www.genovatoday.it/eventi/"
-
-    for pagina in range(1, max_pagine + 1):
-        url = base if pagina == 1 else f"{base}?page={pagina}"
-        print(f"  -> GenovaToday p.{pagina}: {url}")
-        soup = get(url)
-        if not soup:
-            break
-
-        articles = soup.find_all("article")
-
-        for article in articles:
-            link_el = article.find("a", href=True)
-            titolo_el = article.find(["h2", "h3"])
-            if not link_el or not titolo_el:
-                continue
-
-            titolo = titolo_el.get_text(strip=True)
-            if not titolo:
-                continue
-
-            href = link_el["href"]
-            if not href.startswith("http"):
-                href = "https://www.genovatoday.it" + href
-
-            time_el = article.find("time")
-            data_raw = ""
-            if time_el:
-                data_raw = time_el.get("datetime", "") or time_el.get_text(strip=True)
-            
-            data_parsata = parse_data_it(data_raw) if data_raw else None
-
-            luogo_el = article.find(class_=re.compile(r"location|place|luogo", re.I))
-            luogo = luogo_el.get_text(strip=True) if luogo_el else "Genova"
-
-            eventi.append({
-                "titolo": titolo,
-                "data": data_parsata,
-                "data_inizio": data_parsata,
-                "data_fine": None,
-                "data_raw": data_raw,
-                "luogo": luogo,
-                "url": href,
-                "fonte": "genovatoday.it",
-                "scraped_at": datetime.now().isoformat(),
-            })
-
-        if not soup.find("a", rel="next"):
-            break
-
-    print(f"  GenovaToday: {len(eventi)} eventi trovati")
-    return eventi
-
-
 def deduplica(eventi: list[dict]) -> list[dict]:
     visti = set()
     unici = []
     for e in eventi:
-        chiave = (re.sub(r"\s+", " ", e["titolo"].lower().strip())[:60], e.get("data_inizio") or "")
+        chiave = (re.sub(r"\s+", " ", e["titolo"].lower().strip())[:60], e.get("data") or "")
         if chiave not in visti:
             visti.add(chiave)
             unici.append(e)
@@ -243,20 +261,23 @@ def deduplica(eventi: list[dict]) -> list[dict]:
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--fonte", choices=["genovatoday", "mentelocale", "tutte"], default="tutte")
-    parser.add_argument("--pagine", type=int, default=3)
+    parser.add_argument("--filtro", choices=["oggi", "domani", "weekend", "settimana", "prossima_settimana", "mese"], default=None)
     parser.add_argument("--output", type=str, default=None)
     args = parser.parse_args()
 
     tutti = []
     if args.fonte in ("genovatoday", "tutte"):
         print("\n[GenovaToday]")
-        tutti.extend(scrape_genovatoday(args.pagine))
+        if args.filtro:
+            tutti.extend(scrape_genovatoday(filtro=args.filtro))
+        else:
+            tutti.extend(scrape_genovatoday())
     if args.fonte in ("mentelocale", "tutte"):
         print("\n[MenteLocale]")
         tutti.extend(scrape_mentelocale())
 
     tutti = deduplica(tutti)
-    tutti.sort(key=lambda e: e.get("data_inizio") or "9999-99-99")
+    tutti.sort(key=lambda e: e.get("data") or "9999-99-99")
 
     risultato = {"generato_il": datetime.now().isoformat(), "totale": len(tutti), "eventi": tutti}
 

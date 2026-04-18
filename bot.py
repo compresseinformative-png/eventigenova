@@ -19,10 +19,6 @@ Setup:
        pip install python-telegram-bot requests beautifulsoup4 lxml
   4. Avvia:
        TOKEN=xxx ADMIN_CHAT_ID=yyy python bot.py
-
-Automazione mattutina:
-  Aggiungere al crontab per digest giornaliero alle 08:00:
-       0 8 * * * TOKEN=xxx ADMIN_CHAT_ID=yyy python /percorso/bot.py --digest
 """
 
 import os
@@ -41,7 +37,6 @@ from telegram.ext import (
     filters,
 )
 
-# importa le funzioni di scraping dal file scraper.py nella stessa cartella
 from scraper import scrape_genovatoday, scrape_mentelocale, deduplica
 
 # --------------------------------------------------------------------------- #
@@ -67,12 +62,13 @@ log = logging.getLogger(__name__)
 # Cache
 # --------------------------------------------------------------------------- #
 
-def carica_cache() -> list[dict]:
-    if not CACHE_FILE.exists():
-        log.info("Cache file non esiste")
+def carica_cache(filtro: str = None) -> list[dict]:
+    """Carica la cache, eventualmente specifica per filtro"""
+    cache_key = CACHE_FILE if not filtro else Path(f"eventi_cache_{filtro}.json")
+    if not cache_key.exists():
         return []
     try:
-        data = json.loads(CACHE_FILE.read_text(encoding="utf-8"))
+        data = json.loads(cache_key.read_text(encoding="utf-8"))
         generato = datetime.fromisoformat(data["generato_il"])
         età = (datetime.now() - generato).total_seconds() / 3600
         if età < CACHE_MAX_AGE_ORE:
@@ -85,44 +81,56 @@ def carica_cache() -> list[dict]:
     return []
 
 
-def salva_cache(eventi: list[dict]):
-    CACHE_FILE.write_text(
+def salva_cache(eventi: list[dict], filtro: str = None):
+    """Salva la cache, eventualmente specifica per filtro"""
+    cache_key = CACHE_FILE if not filtro else Path(f"eventi_cache_{filtro}.json")
+    cache_key.write_text(
         json.dumps({"generato_il": datetime.now().isoformat(), "eventi": eventi},
                    ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
-    log.info(f"Salvati {len(eventi)} eventi in cache")
+    log.info(f"Salvati {len(eventi)} eventi in cache ({filtro or 'generale'})")
 
 
-def get_eventi(force: bool = False) -> list[dict]:
-    # Se FORCE_SCRAPE è attivo, ignoro la cache
+def get_eventi(filtro: str = None, force: bool = False) -> list[dict]:
+    """
+    Ottiene eventi usando i filtri di GenovaToday
+    Filtri: "oggi", "domani", "weekend", "settimana", "prossima_settimana", "mese"
+    """
     if FORCE_SCRAPE:
         log.info("⚠️ FORCE_SCRAPE attivo - ignoro la cache")
         force = True
     
     if not force:
-        cached = carica_cache()
+        cached = carica_cache(filtro)
         if cached:
             return cached
     
-    log.info("Avvio scraping...")
-    tutti = deduplica(scrape_genovatoday() + scrape_mentelocale())
-    tutti.sort(key=lambda e: e.get("data_inizio") or e.get("data") or "9999-99-99")
+    log.info(f"Avvio scraping con filtro: {filtro or 'nessuno'}...")
     
-    # DEBUG: stampa primi 5 eventi con data
-    log.info("Primi 5 eventi scrapati:")
-    for i, e in enumerate(tutti[:5]):
-        data_inizio = e.get('data_inizio') or e.get('data')
-        data_fine = e.get('data_fine')
-        log.info(f"  {i+1}. {e['titolo'][:50]}... inizio={data_inizio}, fine={data_fine}")
+    eventi = []
     
-    # Conta quanti eventi hanno una data valida
-    con_data = sum(1 for e in tutti if e.get('data_inizio') or e.get('data'))
-    log.info(f"Eventi con data valida: {con_data}/{len(tutti)}")
+    # Scraping GenovaToday con filtro
+    if filtro:
+        eventi_genova = scrape_genovatoday(filtro=filtro)
+    else:
+        eventi_genova = scrape_genovatoday()
     
-    salva_cache(tutti)
-    log.info(f"Scraping completato: {len(tutti)} eventi")
-    return tutti
+    eventi.extend(eventi_genova)
+    
+    # Scraping MenteLocale (sempre completo, poi filtriamo)
+    eventi.extend(scrape_mentelocale())
+    
+    eventi = deduplica(eventi)
+    eventi.sort(key=lambda e: e.get("data") or "9999-99-99")
+    
+    log.info(f"Primi 3 eventi scrapati:")
+    for i, e in enumerate(eventi[:3]):
+        log.info(f"  {i+1}. {e['titolo'][:50]}... data={e.get('data')}")
+    
+    salva_cache(eventi, filtro)
+    log.info(f"Scraping completato: {len(eventi)} eventi")
+    return eventi
 
 
 # --------------------------------------------------------------------------- #
@@ -136,7 +144,7 @@ def fmt_evento(e: dict, num: int | None = None) -> str:
     else:
         righe.append(f"*{e['titolo']}*")
 
-    # Gestione data con intervallo
+    # Gestione data con intervallo per MenteLocale
     data_inizio = e.get('data_inizio') or e.get('data')
     data_fine = e.get('data_fine')
     
@@ -144,13 +152,22 @@ def fmt_evento(e: dict, num: int | None = None) -> str:
         try:
             d_inizio = date.fromisoformat(data_inizio)
             d_fine = date.fromisoformat(data_fine)
-            righe.append(f"📅 Dal {d_inizio.strftime('%d/%m/%Y')} al {d_fine.strftime('%d/%m/%Y')}")
+            if d_inizio.month == d_fine.month and d_inizio.year == d_fine.year:
+                righe.append(f"📅 Dal {d_inizio.day} al {d_fine.day} {d_inizio.strftime('%B').capitalize()} {d_inizio.year}")
+            else:
+                righe.append(f"📅 Dal {d_inizio.strftime('%d/%m/%Y')} al {d_fine.strftime('%d/%m/%Y')}")
         except ValueError:
             righe.append(f"📅 Dal {data_inizio} al {data_fine}")
     elif data_inizio:
         try:
             d = date.fromisoformat(data_inizio)
-            righe.append(f"📅 {d.strftime('%A %d %B').capitalize()}")
+            oggi = date.today()
+            if d < oggi:
+                righe.append(f"📅 Iniziato il {d.strftime('%d/%m/%Y')} (in corso)")
+            elif d == oggi:
+                righe.append(f"📅 Oggi, {d.strftime('%d/%m/%Y')}")
+            else:
+                righe.append(f"📅 {d.strftime('%A %d %B').capitalize()} {d.year}")
         except ValueError:
             righe.append(f"📅 {data_inizio}")
     elif e.get("data_raw"):
@@ -168,64 +185,6 @@ def fmt_evento(e: dict, num: int | None = None) -> str:
     righe.append(f"_Fonte: {fonte}_")
 
     return "\n".join(righe)
-
-
-def filtra_per_data(eventi: list[dict], target: date) -> list[dict]:
-    """
-    Filtra eventi che sono attivi nella data target.
-    Gestisce sia eventi con data singola che con intervallo.
-    """
-    target_str = target.isoformat()
-    filtrati = []
-    
-    for e in eventi:
-        data_inizio = e.get("data_inizio") or e.get("data")
-        data_fine = e.get("data_fine")
-        
-        if data_inizio and data_fine:
-            # Evento con intervallo di date
-            if data_inizio <= target_str <= data_fine:
-                filtrati.append(e)
-        elif data_inizio:
-            # Evento con data singola
-            if data_inizio == target_str:
-                filtrati.append(e)
-    
-    log.info(f"Filtro per data {target_str}: {len(filtrati)} eventi su {len(eventi)} totali")
-    
-    # DEBUG: mostra alcune date di esempio
-    if filtrati:
-        log.info(f"Primi eventi filtrati: {[(e.get('titolo', '')[:30], e.get('data_inizio'), e.get('data_fine')) for e in filtrati[:3]]}")
-    
-    return filtrati
-
-
-def filtra_weekend(eventi: list[dict]) -> list[dict]:
-    """Filtra eventi che cadono nel prossimo weekend (sabato o domenica)"""
-    oggi = date.today()
-    giorni_a_sab = (5 - oggi.weekday()) % 7 or 7
-    sabato = oggi + timedelta(days=giorni_a_sab)
-    domenica = sabato + timedelta(days=1)
-    
-    sabato_str = sabato.isoformat()
-    domenica_str = domenica.isoformat()
-    
-    filtrati = []
-    for e in eventi:
-        data_inizio = e.get("data_inizio") or e.get("data")
-        data_fine = e.get("data_fine")
-        
-        if data_inizio and data_fine:
-            # Verifica se l'intervallo copre sabato o domenica
-            if (data_inizio <= sabato_str <= data_fine) or (data_inizio <= domenica_str <= data_fine):
-                filtrati.append(e)
-        elif data_inizio:
-            # Data singola
-            if data_inizio in (sabato_str, domenica_str):
-                filtrati.append(e)
-    
-    log.info(f"Weekend ({sabato_str}, {domenica_str}): {len(filtrati)} eventi")
-    return filtrati
 
 
 def invia_lista(eventi_filtrati: list[dict], intestazione: str) -> str:
@@ -263,31 +222,28 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_oggi(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("⏳ Cerco gli eventi di oggi...")
-    eventi = get_eventi()
-    log.info(f"Totale eventi in cache: {len(eventi)}")
-    
+    eventi = get_eventi(filtro="oggi")
     oggi = date.today()
-    filtrati = filtra_per_data(eventi, oggi)
-    
-    testo = invia_lista(filtrati, f"🗓 *Eventi oggi — {oggi.strftime('%d/%m/%Y')}*")
-    log.info(f"Invio risposta con {len(filtrati)} eventi")
+    testo = invia_lista(eventi, f"🗓 *Eventi oggi — {oggi.strftime('%d/%m/%Y')}*")
     await update.message.reply_text(testo, parse_mode="Markdown", disable_web_page_preview=True)
 
 
 async def cmd_domani(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("⏳ Cerco gli eventi di domani...")
-    eventi = get_eventi()
+    eventi = get_eventi(filtro="domani")
     domani = date.today() + timedelta(days=1)
-    filtrati = filtra_per_data(eventi, domani)
-    testo = invia_lista(filtrati, f"🗓 *Eventi domani — {domani.strftime('%d/%m/%Y')}*")
+    testo = invia_lista(eventi, f"🗓 *Eventi domani — {domani.strftime('%d/%m/%Y')}*")
     await update.message.reply_text(testo, parse_mode="Markdown", disable_web_page_preview=True)
 
 
 async def cmd_weekend(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("⏳ Cerco gli eventi del weekend...")
-    eventi = get_eventi()
-    filtrati = filtra_weekend(eventi)
-    testo = invia_lista(filtrati, "🎉 *Eventi del weekend*")
+    eventi = get_eventi(filtro="weekend")
+    oggi = date.today()
+    giorni_a_sab = (5 - oggi.weekday()) % 7 or 7
+    sabato = oggi + timedelta(days=giorni_a_sab)
+    domenica = sabato + timedelta(days=1)
+    testo = invia_lista(eventi, f"🎉 *Eventi del weekend ({sabato.strftime('%d/%m')} - {domenica.strftime('%d/%m')})*")
     await update.message.reply_text(testo, parse_mode="Markdown", disable_web_page_preview=True)
 
 
@@ -313,8 +269,12 @@ async def cmd_aggiorna(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⛔ Comando riservato all'admin.")
         return
     await update.message.reply_text("⏳ Aggiornamento in corso, potrebbe richiedere 30-60 secondi...")
-    eventi = get_eventi(force=True)
-    await update.message.reply_text(f"✅ Aggiornato! Trovati *{len(eventi)} eventi*.", parse_mode="Markdown")
+    
+    # Forza aggiornamento per tutti i filtri
+    for filtro in ["oggi", "domani", "weekend", None]:
+        eventi = get_eventi(filtro=filtro, force=True)
+    
+    await update.message.reply_text(f"✅ Aggiornato! Ora puoi usare /oggi, /domani, /weekend.")
 
 
 async def cmd_svuota_cache(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -324,15 +284,19 @@ async def cmd_svuota_cache(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     
     try:
-        if CACHE_FILE.exists():
-            CACHE_FILE.unlink()
-            await update.message.reply_text("🗑️ Cache svuotata! Ricarico gli eventi...")
-            eventi = get_eventi(force=True)
-            await update.message.reply_text(f"✅ Ricaricati {len(eventi)} eventi!")
-        else:
-            await update.message.reply_text("ℹ️ Cache già vuota. Ricarico...")
-            eventi = get_eventi(force=True)
-            await update.message.reply_text(f"✅ Ricaricati {len(eventi)} eventi!")
+        # Cancella tutti i file di cache
+        cache_files = list(Path(".").glob("eventi_cache*.json"))
+        for f in cache_files:
+            f.unlink()
+            log.info(f"Cancellato {f}")
+        
+        await update.message.reply_text("🗑️ Cache svuotata! Ricarico gli eventi...")
+        
+        # Ricarica tutti i filtri
+        for filtro in ["oggi", "domani", "weekend", None]:
+            eventi = get_eventi(filtro=filtro, force=True)
+        
+        await update.message.reply_text(f"✅ Cache ricaricata con successo!")
     except Exception as e:
         await update.message.reply_text(f"❌ Errore: {e}")
 
@@ -344,32 +308,35 @@ async def msg_sconosciuto(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 # --------------------------------------------------------------------------- #
-# Digest mattutino (inviato da cron, non dal polling)
+# Digest mattutino
 # --------------------------------------------------------------------------- #
 
 async def invia_digest():
-    """Invia il digest giornaliero all'admin via Telegram."""
     from telegram import Bot
     bot = Bot(token=TOKEN)
-    eventi = get_eventi()
-    oggi_ev = filtra_per_data(eventi, date.today())
-    domani_ev = filtra_per_data(eventi, date.today() + timedelta(days=1))
+    
+    eventi_oggi = get_eventi(filtro="oggi")
+    eventi_domani = get_eventi(filtro="domani")
+    eventi_weekend = get_eventi(filtro="weekend")
 
     testo = (
         f"☀️ *Buongiorno! Digest eventi Genova — {date.today().strftime('%d/%m/%Y')}*\n\n"
-        f"📌 *Oggi ({len(oggi_ev)} eventi)*\n"
+        f"📌 *Oggi ({len(eventi_oggi)} eventi)*\n"
     )
 
-    for e in oggi_ev[:5]:
+    for e in eventi_oggi[:5]:
         testo += f"• {e['titolo']} — {e.get('luogo', 'Genova')}\n"
-    if not oggi_ev:
+    if not eventi_oggi:
         testo += "_Nessun evento_\n"
 
-    testo += f"\n📌 *Domani ({len(domani_ev)} eventi)*\n"
-    for e in domani_ev[:3]:
+    testo += f"\n📌 *Domani ({len(eventi_domani)} eventi)*\n"
+    for e in eventi_domani[:3]:
         testo += f"• {e['titolo']} — {e.get('luogo', 'Genova')}\n"
-    if not domani_ev:
+    if not eventi_domani:
         testo += "_Nessun evento_\n"
+    
+    if eventi_weekend:
+        testo += f"\n🎉 *Weekend: {len(eventi_weekend)} eventi in programma!*\n"
 
     testo += "\n_Scrivi /oggi o /weekend per i dettagli._"
 
