@@ -26,12 +26,10 @@ def parse_data_it(testo: str) -> str | None:
     
     testo = testo.strip()
     
-    # ISO completo con timezone: 2025-04-18T10:00:00+02:00
     m = re.match(r"(\d{4})-(\d{2})-(\d{2})(?:[T\s]\d{2}:\d{2}.*)?", testo)
     if m:
         return f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
     
-    # DD/MM/YYYY
     m = re.match(r"(\d{1,2})/(\d{1,2})/(\d{4})", testo)
     if m:
         g, mes, y = int(m.group(1)), int(m.group(2)), int(m.group(3))
@@ -40,6 +38,20 @@ def parse_data_it(testo: str) -> str | None:
         except ValueError:
             pass
     
+    return None
+
+
+def parse_data_input(data_str: str) -> date | None:
+    """Parsa una data in input dall'utente (formato DD/MM/YYYY)"""
+    if not data_str:
+        return None
+    m = re.match(r"(\d{1,2})/(\d{1,2})/(\d{4})", data_str.strip())
+    if m:
+        g, mes, y = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        try:
+            return date(y, mes, g)
+        except ValueError:
+            return None
     return None
 
 
@@ -53,9 +65,14 @@ def get(url: str) -> BeautifulSoup | None:
         return None
 
 
-def scrape_genovatoday(filtro: str = None) -> list[dict]:
+def scrape_genovatoday(filtro: str = None, data_inizio: date = None, data_fine: date = None) -> list[dict]:
     """
     GenovaToday con filtro date via URL
+    Filtri disponibili:
+    - "oggi": eventi di oggi
+    - "domani": eventi di domani  
+    - "weekend": eventi del weekend in corso
+    - oppure data_inizio e data_fine per intervallo
     """
     eventi = []
     
@@ -76,9 +93,11 @@ def scrape_genovatoday(filtro: str = None) -> list[dict]:
         else:
             sabato = oggi - timedelta(days=oggi.weekday() + 2)
             domenica = sabato + timedelta(days=1)
-        
         url = f"https://www.genovatoday.it/eventi/dal/{sabato.isoformat()}/al/{domenica.isoformat()}/"
         print(f"  Weekend: {sabato.strftime('%d/%m')} - {domenica.strftime('%d/%m')}")
+    elif data_inizio and data_fine:
+        url = f"https://www.genovatoday.it/eventi/dal/{data_inizio.isoformat()}/al/{data_fine.isoformat()}/"
+        print(f"  Intervallo: {data_inizio.strftime('%d/%m/%Y')} - {data_fine.strftime('%d/%m/%Y')}")
     else:
         return eventi
     
@@ -89,14 +108,6 @@ def scrape_genovatoday(filtro: str = None) -> list[dict]:
 
     articles = soup.find_all("article")
     
-    # DEBUG: stampa quanti articoli trova e i primi titoli
-    print(f"  [DEBUG] Trovati {len(articles)} articoli")
-    for i, art in enumerate(articles[:5]):
-        titolo_el = art.find(["h2", "h3"])
-        if titolo_el:
-            print(f"  [DEBUG] Articolo {i}: {titolo_el.get_text(strip=True)[:50]}")
-    
-    # Prendi TUTTI gli articoli per ora (senza saltare)
     for article in articles:
         link_el = article.find("a", href=True)
         titolo_el = article.find(["h2", "h3"])
@@ -138,13 +149,22 @@ def scrape_genovatoday(filtro: str = None) -> list[dict]:
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--filtro", choices=["oggi", "domani", "weekend"], required=True,
-                        help="Filtro per data: oggi, domani, weekend")
-    parser.add_argument("--output", type=str, default=None,
-                        help="File di output JSON")
+    parser.add_argument("--filtro", choices=["oggi", "domani", "weekend"], default=None)
+    parser.add_argument("--data-inizio", type=str, default=None, help="Data inizio YYYY-MM-DD")
+    parser.add_argument("--data-fine", type=str, default=None, help="Data fine YYYY-MM-DD")
+    parser.add_argument("--output", type=str, default=None)
     args = parser.parse_args()
 
-    eventi = scrape_genovatoday(filtro=args.filtro)
+    eventi = []
+    if args.filtro:
+        eventi = scrape_genovatoday(filtro=args.filtro)
+    elif args.data_inizio and args.data_fine:
+        try:
+            d_inizio = date.fromisoformat(args.data_inizio)
+            d_fine = date.fromisoformat(args.data_fine)
+            eventi = scrape_genovatoday(data_inizio=d_inizio, data_fine=d_fine)
+        except ValueError:
+            print("Formato data non valido. Usa YYYY-MM-DD")
     
     eventi.sort(key=lambda e: e.get("data") or "9999-99-99")
     
