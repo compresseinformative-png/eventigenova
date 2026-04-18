@@ -72,9 +72,6 @@ def scrape_genovatoday(filtro: str = None) -> list[dict]:
         url = f"https://www.genovatoday.it/eventi/dal/{domani.isoformat()}/al/{domani.isoformat()}/"
     elif filtro == "weekend":
         # Weekend in corso: sabato e domenica di questa settimana
-        # Se oggi è sabato o domenica, prendi questo weekend
-        # Altrimenti prendi il weekend che include oggi (se oggi è tra sabato e domenica della settimana corrente)
-        giorni_a_sabato = (5 - oggi.weekday()) % 7  # giorni al prossimo sabato
         if oggi.weekday() == 5:  # sabato
             sabato = oggi
             domenica = oggi + timedelta(days=1)
@@ -83,11 +80,11 @@ def scrape_genovatoday(filtro: str = None) -> list[dict]:
             domenica = oggi
         else:
             # Vai al sabato precedente
-            sabato = oggi - timedelta(days=oggi.weekday() + 2)  # sabato scorso
+            sabato = oggi - timedelta(days=oggi.weekday() + 2)
             domenica = sabato + timedelta(days=1)
         
         url = f"https://www.genovatoday.it/eventi/dal/{sabato.isoformat()}/al/{domenica.isoformat()}/"
-        print(f"  Weekend calcolato: {sabato.isoformat()} - {domenica.isoformat()}")
+        print(f"  Weekend: {sabato.strftime('%d/%m')} - {domenica.strftime('%d/%m')}")
     else:
         return eventi
     
@@ -98,21 +95,8 @@ def scrape_genovatoday(filtro: str = None) -> list[dict]:
 
     articles = soup.find_all("article")
     
-    for article in articles:
-        # CRITERIO FONDAMENTALE: deve avere un tag <time> con data
-        time_el = article.find("time")
-        if not time_el:
-            continue  # Salta articoli senza data (come quelli promozionali)
-        
-        data_raw = time_el.get("datetime", "") or time_el.get_text(strip=True)
-        if not data_raw:
-            continue
-        
-        data_parsata = parse_data_it(data_raw)
-        if not data_parsata:
-            continue
-        
-        # Ora cerchiamo il titolo e il link
+    # ESCLUDI I PRIMI 2 ARTICOLI (quelli promozionali tipo Beef e Bollette)
+    for article in articles[2:]:
         link_el = article.find("a", href=True)
         titolo_el = article.find(["h2", "h3"])
         
@@ -126,6 +110,14 @@ def scrape_genovatoday(filtro: str = None) -> list[dict]:
         href = link_el["href"]
         if not href.startswith("http"):
             href = "https://www.genovatoday.it" + href
+        
+        # Cerca la data
+        time_el = article.find("time")
+        data_raw = ""
+        data_parsata = None
+        if time_el:
+            data_raw = time_el.get("datetime", "") or time_el.get_text(strip=True)
+            data_parsata = parse_data_it(data_raw) if data_raw else None
         
         # Cerca il luogo
         luogo_el = article.find(class_=re.compile(r"location|place|luogo", re.I))
