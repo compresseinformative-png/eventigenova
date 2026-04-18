@@ -53,51 +53,66 @@ def get(url: str) -> BeautifulSoup | None:
         return None
 
 
-def scrape_genovatoday(filtro: str = None, data_inizio: str = None, data_fine: str = None) -> list[dict]:
+def scrape_genovatoday(filtro: str = None) -> list[dict]:
     """
     GenovaToday con filtro date via URL
     Filtri disponibili:
     - "oggi": eventi di oggi
     - "domani": eventi di domani  
-    - "weekend": eventi del weekend (sabato e domenica)
-    Oppure usa data_inizio e data_fine in formato YYYY-MM-DD
+    - "weekend": eventi del weekend in corso (sabato e domenica di questa settimana)
     """
     eventi = []
     
-    # Costruisci l'URL con il filtro appropriato
-    if filtro:
-        oggi = date.today()
-        if filtro == "oggi":
-            url = f"https://www.genovatoday.it/eventi/dal/{oggi.isoformat()}/al/{oggi.isoformat()}/"
-        elif filtro == "domani":
-            domani = oggi + timedelta(days=1)
-            url = f"https://www.genovatoday.it/eventi/dal/{domani.isoformat()}/al/{domani.isoformat()}/"
-        elif filtro == "weekend":
-            giorni_a_sab = (5 - oggi.weekday()) % 7
-            if giorni_a_sab == 0:
-                giorni_a_sab = 7
-            sabato = oggi + timedelta(days=giorni_a_sab)
-            domenica = sabato + timedelta(days=1)
-            url = f"https://www.genovatoday.it/eventi/dal/{sabato.isoformat()}/al/{domenica.isoformat()}/"
+    oggi = date.today()
+    
+    if filtro == "oggi":
+        url = f"https://www.genovatoday.it/eventi/dal/{oggi.isoformat()}/al/{oggi.isoformat()}/"
+    elif filtro == "domani":
+        domani = oggi + timedelta(days=1)
+        url = f"https://www.genovatoday.it/eventi/dal/{domani.isoformat()}/al/{domani.isoformat()}/"
+    elif filtro == "weekend":
+        # Weekend in corso: sabato e domenica di questa settimana
+        # Se oggi è sabato o domenica, prendi questo weekend
+        # Altrimenti prendi il weekend che include oggi (se oggi è tra sabato e domenica della settimana corrente)
+        giorni_a_sabato = (5 - oggi.weekday()) % 7  # giorni al prossimo sabato
+        if oggi.weekday() == 5:  # sabato
+            sabato = oggi
+            domenica = oggi + timedelta(days=1)
+        elif oggi.weekday() == 6:  # domenica
+            sabato = oggi - timedelta(days=1)
+            domenica = oggi
         else:
-            url = "https://www.genovatoday.it/eventi/"
-    elif data_inizio and data_fine:
-        url = f"https://www.genovatoday.it/eventi/dal/{data_inizio}/al/{data_fine}/"
+            # Vai al sabato precedente
+            sabato = oggi - timedelta(days=oggi.weekday() + 2)  # sabato scorso
+            domenica = sabato + timedelta(days=1)
+        
+        url = f"https://www.genovatoday.it/eventi/dal/{sabato.isoformat()}/al/{domenica.isoformat()}/"
+        print(f"  Weekend calcolato: {sabato.isoformat()} - {domenica.isoformat()}")
     else:
-        url = "https://www.genovatoday.it/eventi/"
+        return eventi
     
     print(f"  -> GenovaToday: {url}")
     soup = get(url)
     if not soup:
         return eventi
 
-    # Cerca solo gli articoli che sono eventi (di solito hanno una classe specifica)
-    # Escludiamo l'header che contiene link promozionali
     articles = soup.find_all("article")
     
-    # Filtra gli articoli: escludi quelli che sono chiaramente notizie/articoli
     for article in articles:
-        # Cerca il link all'articolo
+        # CRITERIO FONDAMENTALE: deve avere un tag <time> con data
+        time_el = article.find("time")
+        if not time_el:
+            continue  # Salta articoli senza data (come quelli promozionali)
+        
+        data_raw = time_el.get("datetime", "") or time_el.get_text(strip=True)
+        if not data_raw:
+            continue
+        
+        data_parsata = parse_data_it(data_raw)
+        if not data_parsata:
+            continue
+        
+        # Ora cerchiamo il titolo e il link
         link_el = article.find("a", href=True)
         titolo_el = article.find(["h2", "h3"])
         
@@ -108,22 +123,9 @@ def scrape_genovatoday(filtro: str = None, data_inizio: str = None, data_fine: s
         if not titolo or len(titolo) < 5:
             continue
         
-        # Salta articoli che sembrano notizie (contengono parole chiave)
-        parole_notizie = ["notizia", "cronaca", "politica", "sport", "economia", "video", "foto"]
-        if any(parola in titolo.lower() for parola in parole_notizie):
-            continue
-        
         href = link_el["href"]
         if not href.startswith("http"):
             href = "https://www.genovatoday.it" + href
-        
-        # Cerca la data nell'articolo
-        time_el = article.find("time")
-        data_raw = ""
-        data_parsata = None
-        if time_el:
-            data_raw = time_el.get("datetime", "") or time_el.get_text(strip=True)
-            data_parsata = parse_data_it(data_raw) if data_raw else None
         
         # Cerca il luogo
         luogo_el = article.find(class_=re.compile(r"location|place|luogo", re.I))
@@ -145,22 +147,19 @@ def scrape_genovatoday(filtro: str = None, data_inizio: str = None, data_fine: s
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--filtro", choices=["oggi", "domani", "weekend"], default=None,
+    parser.add_argument("--filtro", choices=["oggi", "domani", "weekend"], required=True,
                         help="Filtro per data: oggi, domani, weekend")
     parser.add_argument("--output", type=str, default=None,
                         help="File di output JSON")
     args = parser.parse_args()
 
-    if args.filtro:
-        eventi = scrape_genovatoday(filtro=args.filtro)
-    else:
-        eventi = scrape_genovatoday()
+    eventi = scrape_genovatoday(filtro=args.filtro)
     
     eventi.sort(key=lambda e: e.get("data") or "9999-99-99")
     
     risultato = {
         "generato_il": datetime.now().isoformat(),
-        "filtro": args.filtro or "tutti",
+        "filtro": args.filtro,
         "totale": len(eventi),
         "eventi": eventi
     }

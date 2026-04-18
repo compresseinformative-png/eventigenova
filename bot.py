@@ -5,7 +5,7 @@ Bot Telegram — Aggregatore eventi Genova
 Comandi disponibili:
   /oggi       → eventi di oggi
   /domani     → eventi di domani
-  /weekend    → eventi del prossimo weekend
+  /weekend    → eventi del weekend in corso
   /cerca jazz → cerca eventi per parola chiave
   /aggiorna   → forza un nuovo scraping (solo admin)
   /svuota_cache → svuota la cache e ricarica (solo admin)
@@ -121,7 +121,7 @@ def get_eventi(filtro: str, force: bool = False) -> list[dict]:
     log.info(f"Avvio scraping per '{filtro}'...")
     eventi = scrape_genovatoday(filtro=filtro)
     
-    # Ordina per data (più recenti prima)
+    # Ordina per data
     eventi.sort(key=lambda e: e.get("data") or "9999-99-99")
     
     salva_cache(filtro, eventi)
@@ -133,13 +133,10 @@ def get_eventi(filtro: str, force: bool = False) -> list[dict]:
 # Formattazione messaggi
 # --------------------------------------------------------------------------- #
 
-def fmt_evento(e: dict, num: int | None = None) -> str:
-    righe = []
-    if num:
-        righe.append(f"*{num}. {e['titolo']}*")
-    else:
-        righe.append(f"*{e['titolo']}*")
-
+def fmt_evento(e: dict, num: int) -> str:
+    """Formatta un singolo evento"""
+    righe = [f"*{num}. {e['titolo']}*"]
+    
     if e.get("data"):
         try:
             d = date.fromisoformat(e["data"])
@@ -164,19 +161,25 @@ def fmt_evento(e: dict, num: int | None = None) -> str:
     return "\n".join(righe)
 
 
-def invia_lista(eventi: list[dict], intestazione: str) -> str:
+async def invia_lista(update: Update, eventi: list[dict], intestazione: str):
+    """Invia gli eventi in più messaggi, 15 per volta"""
     if not eventi:
-        return f"{intestazione}\n\n_Nessun evento trovato_ 😔"
-
-    parti = [intestazione + "\n"]
-    for i, e in enumerate(eventi[:15], 1):  # Max 15 eventi per messaggio
-        parti.append(fmt_evento(e, i))
-        parti.append("—" * 20)
-
-    if len(eventi) > 15:
-        parti.append(f"_...e altri {len(eventi) - 15} eventi. Usa /cerca per filtrare._")
-
-    return "\n".join(parti)
+        await update.message.reply_text(f"{intestazione}\n\n_Nessun evento trovato_ 😔")
+        return
+    
+    # Invia l'intestazione
+    await update.message.reply_text(intestazione)
+    
+    # Invia gli eventi in blocchi da 15
+    blocco_size = 15
+    for i in range(0, len(eventi), blocco_size):
+        blocco = eventi[i:i+blocco_size]
+        messaggio = ""
+        for idx, e in enumerate(blocco, start=i+1):
+            messaggio += fmt_evento(e, idx) + "\n\n" + "—" * 20 + "\n\n"
+        
+        if messaggio:
+            await update.message.reply_text(messaggio, parse_mode="Markdown", disable_web_page_preview=True)
 
 
 # --------------------------------------------------------------------------- #
@@ -189,7 +192,7 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "Comandi disponibili:\n"
         "• /oggi — eventi di oggi\n"
         "• /domani — eventi di domani\n"
-        "• /weekend — eventi del weekend\n"
+        "• /weekend — eventi del weekend in corso\n"
         "• /cerca \\[parola\\] — cerca un evento\n"
         "• /aggiorna — forza aggiornamento (admin)\n"
         "• /svuota_cache — svuota cache e ricarica (admin)\n"
@@ -202,29 +205,32 @@ async def cmd_oggi(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("⏳ Cerco gli eventi di oggi...")
     eventi = get_eventi("oggi")
     oggi = date.today()
-    testo = invia_lista(eventi, f"🗓 *Eventi OGGI — {oggi.strftime('%d/%m/%Y')}*")
-    await update.message.reply_text(testo, parse_mode="Markdown", disable_web_page_preview=True)
+    await invia_lista(update, eventi, f"🗓 *EVENTI OGGI — {oggi.strftime('%d/%m/%Y')}*\n")
 
 
 async def cmd_domani(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("⏳ Cerco gli eventi di domani...")
     eventi = get_eventi("domani")
     domani = date.today() + timedelta(days=1)
-    testo = invia_lista(eventi, f"🗓 *Eventi DOMANI — {domani.strftime('%d/%m/%Y')}*")
-    await update.message.reply_text(testo, parse_mode="Markdown", disable_web_page_preview=True)
+    await invia_lista(update, eventi, f"🗓 *EVENTI DOMANI — {domani.strftime('%d/%m/%Y')}*\n")
 
 
 async def cmd_weekend(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("⏳ Cerco gli eventi del weekend...")
+    await update.message.reply_text("⏳ Cerco gli eventi del weekend in corso...")
     eventi = get_eventi("weekend")
+    
     oggi = date.today()
-    giorni_a_sab = (5 - oggi.weekday()) % 7
-    if giorni_a_sab == 0:
-        giorni_a_sab = 7
-    sabato = oggi + timedelta(days=giorni_a_sab)
-    domenica = sabato + timedelta(days=1)
-    testo = invia_lista(eventi, f"🎉 *Eventi WEEKEND ({sabato.strftime('%d/%m')} - {domenica.strftime('%d/%m')})*")
-    await update.message.reply_text(testo, parse_mode="Markdown", disable_web_page_preview=True)
+    if oggi.weekday() == 5:  # sabato
+        sabato = oggi
+        domenica = oggi + timedelta(days=1)
+    elif oggi.weekday() == 6:  # domenica
+        sabato = oggi - timedelta(days=1)
+        domenica = oggi
+    else:
+        sabato = oggi - timedelta(days=oggi.weekday() + 2)
+        domenica = sabato + timedelta(days=1)
+    
+    await invia_lista(update, eventi, f"🎉 *EVENTI WEEKEND ({sabato.strftime('%d/%m')} - {domenica.strftime('%d/%m')})*\n")
 
 
 async def cmd_cerca(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -239,7 +245,7 @@ async def cmd_cerca(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(f"⏳ Cerco \"{query}\" tra gli eventi...")
     
-    # Cerca in tutti gli eventi (oggi, domani, weekend)
+    # Cerca in tutti gli eventi
     tutti_eventi = []
     for filtro in ["oggi", "domani", "weekend"]:
         eventi = get_eventi(filtro)
@@ -260,8 +266,7 @@ async def cmd_cerca(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         or query in e.get("luogo", "").lower()
     ]
     
-    testo = invia_lista(filtrati, f"🔍 *Risultati per \"{query}\"*")
-    await update.message.reply_text(testo, parse_mode="Markdown", disable_web_page_preview=True)
+    await invia_lista(update, filtrati, f"🔍 *RISULTATI PER \"{query.upper()}\"*\n")
 
 
 async def cmd_aggiorna(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -271,36 +276,31 @@ async def cmd_aggiorna(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text("⏳ Aggiornamento in corso, potrebbe richiedere 30-60 secondi...")
     
-    # Forza aggiornamento per tutti i filtri
     for filtro in ["oggi", "domani", "weekend"]:
         eventi = get_eventi(filtro, force=True)
         log.info(f"Aggiornato {filtro}: {len(eventi)} eventi")
     
-    await update.message.reply_text(f"✅ Aggiornamento completato! Usa /oggi, /domani o /weekend.")
+    await update.message.reply_text(f"✅ Aggiornamento completato!")
 
 
 async def cmd_svuota_cache(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Svuota la cache e ricarica gli eventi"""
     if update.effective_user.id != ADMIN_CHAT_ID:
         await update.message.reply_text("⛔ Comando riservato all'admin.")
         return
     
     try:
-        # Cancella tutti i file di cache
         cache_files = list(CACHE_DIR.glob("eventi_*.json"))
         cancellati = 0
         for f in cache_files:
             f.unlink()
             cancellati += 1
         
-        await update.message.reply_text(f"🗑️ Cache svuotata ({cancellati} file). Ricarico gli eventi...")
+        await update.message.reply_text(f"🗑️ Cache svuotata ({cancellati} file). Ricarico...")
         
-        # Ricarica tutti i filtri
         for filtro in ["oggi", "domani", "weekend"]:
             eventi = get_eventi(filtro, force=True)
-            log.info(f"Ricaricato {filtro}: {len(eventi)} eventi")
         
-        await update.message.reply_text(f"✅ Cache ricaricata con successo!")
+        await update.message.reply_text(f"✅ Cache ricaricata!")
     except Exception as e:
         await update.message.reply_text(f"❌ Errore: {e}")
 
@@ -310,7 +310,7 @@ async def msg_sconosciuto(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "Non capisco 🤔 Prova con:\n"
         "/oggi - eventi di oggi\n"
         "/domani - eventi di domani\n"
-        "/weekend - eventi del weekend\n"
+        "/weekend - eventi del weekend in corso\n"
         "/cerca [parola] - cerca un evento"
     )
 
@@ -320,7 +320,6 @@ async def msg_sconosciuto(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 # --------------------------------------------------------------------------- #
 
 async def invia_digest():
-    """Invia il digest giornaliero all'admin via Telegram."""
     from telegram import Bot
     bot = Bot(token=TOKEN)
     
