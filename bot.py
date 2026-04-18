@@ -5,7 +5,7 @@ Bot Telegram — Aggregatore eventi Genova
 Comandi disponibili:
   /oggi              → eventi di oggi
   /domani            → eventi di domani
-  /weekend           → eventi del weekend in corso
+  /weekend           → eventi del weekend
   /data 01/05/2026   → eventi di una data specifica
   /cerca jazz        → cerca eventi per parola chiave
   /aggiorna          → forza un nuovo scraping (solo admin)
@@ -38,7 +38,7 @@ from telegram.ext import (
     filters,
 )
 
-from scraper import scrape_genovatoday, parse_data_input
+from scraper import scrape_mentelocale, converti_data_italiana
 
 # --------------------------------------------------------------------------- #
 # Config
@@ -64,11 +64,11 @@ log = logging.getLogger(__name__)
 # Cache
 # --------------------------------------------------------------------------- #
 
-def get_cache_key(filtro: str = None, data_inizio: str = None, data_fine: str = None) -> str:
+def get_cache_key(filtro: str = None, data: str = None) -> str:
     if filtro:
         return f"eventi_{filtro}.json"
-    elif data_inizio and data_fine:
-        return f"eventi_{data_inizio}_{data_fine}.json"
+    elif data:
+        return f"eventi_data_{data}.json"
     return None
 
 
@@ -102,15 +102,15 @@ def salva_cache(key: str, eventi: list[dict]):
     log.info(f"Salvati {len(eventi)} eventi in cache per '{key}'")
 
 
-def get_eventi(filtro: str = None, data_inizio: date = None, data_fine: date = None, force: bool = False) -> list[dict]:
+def get_eventi(filtro: str = None, data_target: date = None, force: bool = False) -> list[dict]:
     if FORCE_SCRAPE:
         force = True
     
     key = None
     if filtro:
         key = get_cache_key(filtro=filtro)
-    elif data_inizio and data_fine:
-        key = get_cache_key(data_inizio=data_inizio.isoformat(), data_fine=data_fine.isoformat())
+    elif data_target:
+        key = get_cache_key(data=data_target.isoformat())
     
     if not force and key:
         cached = carica_cache(key)
@@ -120,9 +120,9 @@ def get_eventi(filtro: str = None, data_inizio: date = None, data_fine: date = N
     log.info(f"Avvio scraping...")
     
     if filtro:
-        eventi = scrape_genovatoday(filtro=filtro)
-    elif data_inizio and data_fine:
-        eventi = scrape_genovatoday(data_inizio=data_inizio, data_fine=data_fine)
+        eventi = scrape_mentelocale(filtro=filtro)
+    elif data_target:
+        eventi = scrape_mentelocale(data_target=data_target)
     else:
         return []
     
@@ -137,35 +137,57 @@ def get_eventi(filtro: str = None, data_inizio: date = None, data_fine: date = N
 # Formattazione messaggi
 # --------------------------------------------------------------------------- #
 
-def fmt_evento(e: dict, num: int) -> str:
-    righe = [f"*{num}. {e['titolo']}*"]
+def fmt_evento_con_immagine(e: dict, num: int) -> str:
+    """Formatta un evento con immagine (per i primi 10)"""
+    righe = []
     
-    if e.get("data"):
-        try:
-            d = date.fromisoformat(e["data"])
-            oggi = date.today()
-            if d == oggi:
-                righe.append(f"📅 OGGI")
-            elif d == oggi + timedelta(days=1):
-                righe.append(f"📅 DOMANI")
-            else:
-                righe.append(f"📅 {d.strftime('%A %d %B %Y').capitalize()}")
-        except ValueError:
-            righe.append(f"📅 {e.get('data_raw', '')}")
+    # Aggiungi l'immagine se presente
+    if e.get("immagine"):
+        righe.append(f"![Immagine]({e['immagine']})")
+    
+    righe.append(f"*{num}. {e['titolo']}*")
+    
+    # Data
+    if e.get("data_inizio") and e.get("data_fine"):
+        righe.append(f"📅 Dal {e['data_inizio'].replace('-', '/')} al {e['data_fine'].replace('-', '/')}")
+    elif e.get("data_inizio"):
+        righe.append(f"📅 {e['data_inizio'].replace('-', '/')}")
     elif e.get("data_raw"):
         righe.append(f"📅 {e['data_raw']}")
-
-    if e.get("luogo") and e["luogo"] != "Genova":
+    
+    if e.get("luogo"):
         righe.append(f"📍 {e['luogo']}")
-
+    
     if e.get("url"):
         righe.append(f"[→ Dettagli]({e['url']})")
+    
+    righe.append(f"🏷️ {e['fonte']}")
+    
+    return "\n".join(righe)
 
+
+def fmt_evento_semplice(e: dict, num: int) -> str:
+    """Formatta un evento senza immagine (per gli altri)"""
+    righe = [f"*{num}. {e['titolo']}*"]
+    
+    if e.get("data_inizio") and e.get("data_fine"):
+        righe.append(f"📅 Dal {e['data_inizio'].replace('-', '/')} al {e['data_fine'].replace('-', '/')}")
+    elif e.get("data_inizio"):
+        righe.append(f"📅 {e['data_inizio'].replace('-', '/')}")
+    elif e.get("data_raw"):
+        righe.append(f"📅 {e['data_raw']}")
+    
+    if e.get("luogo"):
+        righe.append(f"📍 {e['luogo']}")
+    
+    if e.get("url"):
+        righe.append(f"[→ Dettagli]({e['url']})")
+    
     return "\n".join(righe)
 
 
 async def invia_lista(update_or_bot, eventi: list[dict], intestazione: str, is_digest: bool = False):
-    """Invia gli eventi in più messaggi, 15 per volta"""
+    """Invia gli eventi: primi 10 con immagine, gli altri semplici"""
     if not eventi:
         if is_digest:
             log.info(f"Digest: nessun evento per {intestazione}")
@@ -173,31 +195,31 @@ async def invia_lista(update_or_bot, eventi: list[dict], intestazione: str, is_d
             await update_or_bot.message.reply_text(f"{intestazione}\n\n_Nessun evento trovato_ 😔")
         return
     
+    # Messaggio di intestazione
     if is_digest:
-        # Per i digest, usa il bot direttamente
         bot = update_or_bot
         await bot.send_message(chat_id=ADMIN_CHAT_ID, text=intestazione)
-        
-        blocco_size = 15
-        for i in range(0, len(eventi), blocco_size):
-            blocco = eventi[i:i+blocco_size]
-            messaggio = ""
-            for idx, e in enumerate(blocco, start=i+1):
-                messaggio += fmt_evento(e, idx) + "\n\n" + "—" * 20 + "\n\n"
-            if messaggio:
-                await bot.send_message(chat_id=ADMIN_CHAT_ID, text=messaggio, parse_mode="Markdown", disable_web_page_preview=True)
+        send_func = lambda msg: bot.send_message(chat_id=ADMIN_CHAT_ID, text=msg, parse_mode="Markdown", disable_web_page_preview=True)
     else:
-        # Per i comandi interattivi
         await update_or_bot.message.reply_text(intestazione)
-        
+        send_func = lambda msg: update_or_bot.message.reply_text(msg, parse_mode="Markdown", disable_web_page_preview=True)
+    
+    # Primi 10 con immagine (uno per messaggio)
+    for i, e in enumerate(eventi[:10], 1):
+        messaggio = fmt_evento_con_immagine(e, i)
+        await send_func(messaggio)
+    
+    # Eventuali altri eventi (dal 11 in poi) in blocchi da 15
+    if len(eventi) > 10:
+        rimanenti = eventi[10:]
         blocco_size = 15
-        for i in range(0, len(eventi), blocco_size):
-            blocco = eventi[i:i+blocco_size]
+        for i in range(0, len(rimanenti), blocco_size):
+            blocco = rimanenti[i:i+blocco_size]
             messaggio = ""
-            for idx, e in enumerate(blocco, start=i+1):
-                messaggio += fmt_evento(e, idx) + "\n\n" + "—" * 20 + "\n\n"
+            for idx, e in enumerate(blocco, start=11+i):
+                messaggio += fmt_evento_semplice(e, idx) + "\n\n" + "—" * 20 + "\n\n"
             if messaggio:
-                await update_or_bot.message.reply_text(messaggio, parse_mode="Markdown", disable_web_page_preview=True)
+                await send_func(messaggio)
 
 
 # --------------------------------------------------------------------------- #
@@ -210,12 +232,12 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "Comandi disponibili:\n"
         "• /oggi — eventi di oggi\n"
         "• /domani — eventi di domani\n"
-        "• /weekend — eventi del weekend in corso\n"
+        "• /weekend — eventi del weekend\n"
         "• /data 01/05/2026 — eventi di una data specifica\n"
         "• /cerca jazz — cerca eventi per parola chiave\n"
         "• /aggiorna — forza aggiornamento (admin)\n"
         "• /svuota_cache — svuota cache e ricarica (admin)\n"
-        "\n_Fonte: GenovaToday_"
+        "\n_Fonte: Mentelocale_"
     )
     await update.message.reply_text(testo, parse_mode="Markdown")
 
@@ -235,21 +257,9 @@ async def cmd_domani(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_weekend(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("⏳ Cerco gli eventi del weekend in corso...")
+    await update.message.reply_text("⏳ Cerco gli eventi del weekend...")
     eventi = get_eventi(filtro="weekend")
-    
-    oggi = date.today()
-    if oggi.weekday() == 5:
-        sabato = oggi
-        domenica = oggi + timedelta(days=1)
-    elif oggi.weekday() == 6:
-        sabato = oggi - timedelta(days=1)
-        domenica = oggi
-    else:
-        sabato = oggi - timedelta(days=oggi.weekday() + 2)
-        domenica = sabato + timedelta(days=1)
-    
-    await invia_lista(update, eventi, f"🎉 *EVENTI WEEKEND ({sabato.strftime('%d/%m')} - {domenica.strftime('%d/%m')})*\n")
+    await invia_lista(update, eventi, f"🎉 *EVENTI WEEKEND*\n")
 
 
 async def cmd_data(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -261,16 +271,24 @@ async def cmd_data(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     
     data_str = " ".join(ctx.args).strip()
-    data_target = parse_data_input(data_str)
     
-    if not data_target:
+    # Converte DD/MM/YYYY in oggetto date
+    m = re.match(r"(\d{1,2})/(\d{1,2})/(\d{4})", data_str)
+    if not m:
         await update.message.reply_text(
             f"❌ Formato data non valido. Usa DD/MM/YYYY\nEsempio: /data 01/05/2026"
         )
         return
     
+    g, mese, anno = int(m.group(1)), int(m.group(2)), int(m.group(3))
+    try:
+        data_target = date(anno, mese, g)
+    except ValueError:
+        await update.message.reply_text(f"❌ Data non valida: {data_str}")
+        return
+    
     await update.message.reply_text(f"⏳ Cerco gli eventi del {data_target.strftime('%d/%m/%Y')}...")
-    eventi = get_eventi(data_inizio=data_target, data_fine=data_target)
+    eventi = get_eventi(data_target=data_target)
     
     await invia_lista(update, eventi, f"📅 *EVENTI DEL {data_target.strftime('%d/%m/%Y')}*\n")
 
@@ -292,6 +310,7 @@ async def cmd_cerca(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         eventi = get_eventi(filtro=filtro)
         tutti_eventi.extend(eventi)
     
+    # Deduplica per titolo
     visti = set()
     eventi_unici = []
     for e in tutti_eventi:
@@ -299,6 +318,7 @@ async def cmd_cerca(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             visti.add(e["titolo"])
             eventi_unici.append(e)
     
+    # Filtra per parola chiave
     filtrati = [
         e for e in eventi_unici
         if query in e.get("titolo", "").lower()
@@ -360,71 +380,36 @@ async def msg_sconosciuto(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 # --------------------------------------------------------------------------- #
 
 async def invia_digest_settimana():
-    """Invia il digest della settimana successiva (domenica alle 20:00)"""
     from telegram import Bot
     bot = Bot(token=TOKEN)
     
-    oggi = date.today()
-    # Calcola il lunedì della settimana successiva
-    giorni_a_lunedi = (7 - oggi.weekday()) % 7
-    if giorni_a_lunedi == 0:
-        giorni_a_lunedi = 7
-    lunedi = oggi + timedelta(days=giorni_a_lunedi)
-    domenica = lunedi + timedelta(days=6)
-    
-    log.info(f"Digest settimanale: {lunedi.strftime('%d/%m/%Y')} - {domenica.strftime('%d/%m/%Y')}")
-    
-    # Raccogli eventi per ogni giorno della settimana
-    tutti_eventi = []
-    giorno_corrente = lunedi
-    while giorno_corrente <= domenica:
-        eventi = get_eventi(data_inizio=giorno_corrente, data_fine=giorno_corrente)
-        for e in eventi:
-            e["giorno_display"] = giorno_corrente.strftime("%A %d/%m").capitalize()
-        tutti_eventi.extend(eventi)
-        giorno_corrente += timedelta(days=1)
-    
-    if not tutti_eventi:
-        await bot.send_message(chat_id=ADMIN_CHAT_ID, text=f"📅 *Digest settimanale ({lunedi.strftime('%d/%m')} - {domenica.strftime('%d/%m')})*\n\n_Nessun evento trovato per la prossima settimana_ 😔", parse_mode="Markdown")
-        return
-    
-    # Raggruppa per giorno
-    eventi_per_giorno = {}
-    for e in tutti_eventi:
-        giorno = e.get("giorno_display", "Data sconosciuta")
-        if giorno not in eventi_per_giorno:
-            eventi_per_giorno[giorno] = []
-        eventi_per_giorno[giorno].append(e)
-    
-    # Invia un messaggio per ogni giorno
-    for giorno, eventi in eventi_per_giorno.items():
-        intestazione = f"📅 *{giorno.upper()}*"
-        await invia_lista(bot, eventi, intestazione, is_digest=True)
-    
-    log.info(f"Digest settimanale inviato: {len(tutti_eventi)} eventi totali")
+    eventi_oggi = get_eventi(filtro="oggi")
+    eventi_domani = get_eventi(filtro="domani")
+    eventi_weekend = get_eventi(filtro="weekend")
 
+    testo = (
+        f"☀️ *Buongiorno! Digest eventi Genova — {date.today().strftime('%d/%m/%Y')}*\n\n"
+        f"📌 *OGGI ({len(eventi_oggi)} eventi)*\n"
+    )
 
-async def invia_digest_weekend():
-    """Invia il digest del weekend (venerdì alle 09:00)"""
-    from telegram import Bot
-    bot = Bot(token=TOKEN)
+    for e in eventi_oggi[:5]:
+        testo += f"• {e['titolo']} — {e.get('luogo', 'Genova')}\n"
+    if not eventi_oggi:
+        testo += "_Nessun evento_\n"
+
+    testo += f"\n📌 *DOMANI ({len(eventi_domani)} eventi)*\n"
+    for e in eventi_domani[:3]:
+        testo += f"• {e['titolo']} — {e.get('luogo', 'Genova')}\n"
+    if not eventi_domani:
+        testo += "_Nessun evento_\n"
     
-    oggi = date.today()
-    # Calcola il weekend di questa settimana (sabato e domenica)
-    giorni_a_sabato = (5 - oggi.weekday()) % 7
-    if giorni_a_sabato == 0:
-        giorni_a_sabato = 7
-    sabato = oggi + timedelta(days=giorni_a_sabato)
-    domenica = sabato + timedelta(days=1)
-    
-    log.info(f"Digest weekend: {sabato.strftime('%d/%m/%Y')} - {domenica.strftime('%d/%m/%Y')}")
-    
-    eventi = get_eventi(data_inizio=sabato, data_fine=domenica)
-    
-    intestazione = f"🎉 *WEEKEND ({sabato.strftime('%d/%m')} - {domenica.strftime('%d/%m')})*\n"
-    await invia_lista(bot, eventi, intestazione, is_digest=True)
-    
-    log.info(f"Digest weekend inviato: {len(eventi)} eventi")
+    if eventi_weekend:
+        testo += f"\n🎉 *WEEKEND: {len(eventi_weekend)} eventi in programma!*\n"
+
+    testo += "\n_Scrivi /oggi o /weekend per i dettagli._"
+
+    await bot.send_message(chat_id=ADMIN_CHAT_ID, text=testo, parse_mode="Markdown")
+    log.info("Digest inviato")
 
 
 # --------------------------------------------------------------------------- #
@@ -433,20 +418,15 @@ async def invia_digest_weekend():
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--digest", choices=["weekly", "weekend"], default=None,
-                        help="Invia digest: weekly (domenica) o weekend (venerdì)")
+    parser.add_argument("--digest", action="store_true")
     args = parser.parse_args()
 
     if not TOKEN:
         raise SystemExit("Errore: variabile TOKEN non impostata")
 
-    if args.digest == "weekly":
+    if args.digest:
         import asyncio
         asyncio.run(invia_digest_settimana())
-        return
-    elif args.digest == "weekend":
-        import asyncio
-        asyncio.run(invia_digest_weekend())
         return
 
     log.info("Bot avviato, in ascolto...")

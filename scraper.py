@@ -1,6 +1,6 @@
 """
 Aggregatore eventi Genova
-Scraper per: genovatoday.it con filtri per data
+Scraper per: mentelocale.it con filtri per data
 """
 
 import requests
@@ -19,37 +19,39 @@ HEADERS = {
 }
 
 
-def parse_data_it(testo: str) -> str | None:
-    """Parsa date in vari formati, restituisce YYYY-MM-DD"""
-    if not testo:
-        return None
+def parse_data_mentelocale(data_str: str) -> tuple:
+    """
+    Parsa le date di MenteLocale
+    Formati:
+    - "18/04/2026" -> data singola
+    - "Dal 17/04/2026 al 19/04/2026" -> intervallo
+    Restituisce (data_inizio, data_fine)
+    """
+    if not data_str:
+        return None, None
     
-    testo = testo.strip()
+    # Intervallo: Dal 17/04/2026 al 19/04/2026
+    m_intervallo = re.search(r"Dal\s+(\d{2}/\d{2}/\d{4})\s+al\s+(\d{2}/\d{2}/\d{4})", data_str)
+    if m_intervallo:
+        return m_intervallo.group(1), m_intervallo.group(2)
     
-    m = re.match(r"(\d{4})-(\d{2})-(\d{2})(?:[T\s]\d{2}:\d{2}.*)?", testo)
-    if m:
-        return f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
+    # Data singola: 18/04/2026
+    m_singola = re.match(r"(\d{2}/\d{2}/\d{4})", data_str)
+    if m_singola:
+        return m_singola.group(1), None
     
-    m = re.match(r"(\d{1,2})/(\d{1,2})/(\d{4})", testo)
-    if m:
-        g, mes, y = int(m.group(1)), int(m.group(2)), int(m.group(3))
-        try:
-            return date(y, mes, g).isoformat()
-        except ValueError:
-            pass
-    
-    return None
+    return None, None
 
 
-def parse_data_input(data_str: str) -> date | None:
-    """Parsa una data in input dall'utente (formato DD/MM/YYYY)"""
+def converti_data_italiana(data_str: str) -> str | None:
+    """Converte DD/MM/YYYY in YYYY-MM-DD"""
     if not data_str:
         return None
-    m = re.match(r"(\d{1,2})/(\d{1,2})/(\d{4})", data_str.strip())
+    m = re.match(r"(\d{2})/(\d{2})/(\d{4})", data_str)
     if m:
-        g, mes, y = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        g, mese, anno = int(m.group(1)), int(m.group(2)), int(m.group(3))
         try:
-            return date(y, mes, g)
+            return date(anno, mese, g).isoformat()
         except ValueError:
             return None
     return None
@@ -64,104 +66,107 @@ def get(url: str) -> BeautifulSoup | None:
         print(f"  [ERRORE] {url} -> {e}")
         return None
 
-def scrape_genovatoday(filtro: str = None, data_inizio: date = None, data_fine: date = None) -> list[dict]:
+
+def scrape_mentelocale(filtro: str = None, data_target: date = None) -> list[dict]:
     """
-    GenovaToday con filtro date via URL
+    MenteLocale con filtro date via URL
+    Filtri disponibili:
+    - "oggi": eventi di oggi
+    - "domani": eventi di domani
+    - "weekend": eventi del weekend
     """
     eventi = []
     
-    oggi = date.today()
-    
     if filtro == "oggi":
-        url = f"https://www.genovatoday.it/eventi/dal/{oggi.isoformat()}/al/{oggi.isoformat()}/"
+        url = "https://www.mentelocale.it/genova/eventi/oggi/"
     elif filtro == "domani":
-        domani = oggi + timedelta(days=1)
-        url = f"https://www.genovatoday.it/eventi/dal/{domani.isoformat()}/al/{domani.isoformat()}/"
+        url = "https://www.mentelocale.it/genova/eventi/domani/"
     elif filtro == "weekend":
-        if oggi.weekday() == 5:
-            sabato = oggi
-            domenica = oggi + timedelta(days=1)
-        elif oggi.weekday() == 6:
-            sabato = oggi - timedelta(days=1)
-            domenica = oggi
-        else:
-            sabato = oggi - timedelta(days=oggi.weekday() + 2)
-            domenica = sabato + timedelta(days=1)
-        url = f"https://www.genovatoday.it/eventi/dal/{sabato.isoformat()}/al/{domenica.isoformat()}/"
-    elif data_inizio and data_fine:
-        url = f"https://www.genovatoday.it/eventi/dal/{data_inizio.isoformat()}/al/{data_fine.isoformat()}/"
+        url = "https://www.mentelocale.it/genova/eventi/weekend/"
+    elif data_target:
+        data_str = data_target.strftime("%d-%m-%Y")
+        url = f"https://www.mentelocale.it/genova/eventi/data/{data_str}/"
     else:
         return eventi
     
-    print(f"  -> GenovaToday: {url}")
+    print(f"  -> MenteLocale: {url}")
     soup = get(url)
     if not soup:
         return eventi
-
-    articles = soup.find_all("article")
     
-    for article in articles:
-        link_el = article.find("a", href=True)
-        titolo_el = article.find(["h2", "h3"])
-        
-        if not link_el or not titolo_el:
+    # Trova il container degli eventi
+    container = soup.find("div", class_="ElencoEventi")
+    if not container:
+        print("  [DEBUG] Container .ElencoEventi non trovato")
+        return eventi
+    
+    eventi_div = container.find_all("div", class_="Evento")
+    print(f"  [DEBUG] Trovati {len(eventi_div)} eventi")
+    
+    for ev in eventi_div:
+        # Link e titolo
+        link_el = ev.find("a")
+        if not link_el:
             continue
         
-        href = link_el["href"]
-        if not href.startswith("http"):
-            href = "https://www.genovatoday.it" + href
+        href = link_el.get("href")
+        if href and not href.startswith("http"):
+            href = "https://www.mentelocale.it" + href
         
-        # *** FILTRO CHIAVE: prendi solo i link che puntano a /eventi/ ***
-        if not href.startswith("https://www.genovatoday.it/eventi/"):
-            print(f"  [SKIP] Link escluso (non è un evento): {href[:80]}")
-            continue
+        # Titolo
+        titolo_el = link_el.find("span", class_="Titolo")
+        titolo = titolo_el.get_text(strip=True) if titolo_el else ""
         
-        titolo = titolo_el.get_text(strip=True)
-        if not titolo or len(titolo) < 5:
-            continue
+        # Immagine
+        img_el = link_el.find("img")
+        img_url = ""
+        if img_el:
+            img_url = img_el.get("data-src") or img_el.get("src", "")
+            if img_url and not img_url.startswith("http"):
+                img_url = "https://www.mentelocale.it" + img_url
         
-        time_el = article.find("time")
-        data_raw = ""
-        data_parsata = None
-        if time_el:
-            data_raw = time_el.get("datetime", "") or time_el.get_text(strip=True)
-            data_parsata = parse_data_it(data_raw) if data_raw else None
+        # Data
+        data_el = link_el.find("span", class_="Date")
+        data_raw = data_el.get_text(strip=True) if data_el else ""
+        data_inizio_raw, data_fine_raw = parse_data_mentelocale(data_raw)
         
-        luogo_el = article.find(class_=re.compile(r"location|place|luogo", re.I))
-        luogo = luogo_el.get_text(strip=True) if luogo_el else "Genova"
+        data_inizio = converti_data_italiana(data_inizio_raw) if data_inizio_raw else None
+        data_fine = converti_data_italiana(data_fine_raw) if data_fine_raw else None
+        
+        # Luogo (dai tags)
+        luogo = "Genova"
+        tags_ul = ev.find("ul", class_="Tags")
+        if tags_ul:
+            provincia_li = tags_ul.find("li")
+            if provincia_li:
+                luogo_link = provincia_li.find("a", class_="Provincia")
+                if luogo_link:
+                    luogo = luogo_link.get_text(strip=True)
         
         eventi.append({
             "titolo": titolo,
-            "data": data_parsata,
+            "data": data_inizio,
+            "data_inizio": data_inizio,
+            "data_fine": data_fine,
             "data_raw": data_raw,
             "luogo": luogo,
             "url": href,
-            "fonte": "genovatoday.it",
+            "immagine": img_url,
+            "fonte": "mentelocale.it",
             "scraped_at": datetime.now().isoformat(),
         })
-
-    print(f"  GenovaToday: {len(eventi)} eventi trovati")
+    
+    print(f"  MenteLocale: {len(eventi)} eventi trovati")
     return eventi
+
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--filtro", choices=["oggi", "domani", "weekend"], default=None)
-    parser.add_argument("--data-inizio", type=str, default=None, help="Data inizio YYYY-MM-DD")
-    parser.add_argument("--data-fine", type=str, default=None, help="Data fine YYYY-MM-DD")
+    parser.add_argument("--filtro", choices=["oggi", "domani", "weekend"], required=True)
     parser.add_argument("--output", type=str, default=None)
     args = parser.parse_args()
 
-    eventi = []
-    if args.filtro:
-        eventi = scrape_genovatoday(filtro=args.filtro)
-    elif args.data_inizio and args.data_fine:
-        try:
-            d_inizio = date.fromisoformat(args.data_inizio)
-            d_fine = date.fromisoformat(args.data_fine)
-            eventi = scrape_genovatoday(data_inizio=d_inizio, data_fine=d_fine)
-        except ValueError:
-            print("Formato data non valido. Usa YYYY-MM-DD")
-    
-    eventi.sort(key=lambda e: e.get("data") or "9999-99-99")
+    eventi = scrape_mentelocale(filtro=args.filtro)
     
     risultato = {
         "generato_il": datetime.now().isoformat(),
