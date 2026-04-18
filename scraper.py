@@ -26,19 +26,42 @@ MESI_IT = {
 
 
 def parse_data_it(testo: str) -> str | None:
-    testo = testo.strip().lower()
-    m = re.match(r"(\d{4})-(\d{2})-(\d{2})", testo)
+    """
+    Parsa date in vari formati italiani e ISO, restituisce YYYY-MM-DD
+    Supporta:
+    - 2025-04-18T10:00:00+02:00 (ISO con timezone)
+    - 2025-04-18
+    - 18/04/2025 o 18-04-2025
+    - 18 aprile 2025
+    - 18 aprile (assume anno corrente)
+    """
+    if not testo:
+        return None
+    
+    testo = testo.strip()
+    
+    # 1) ISO completo con timezone: 2025-04-18T10:00:00+02:00 o 2025-04-18 10:00
+    m = re.match(r"(\d{4})-(\d{2})-(\d{2})(?:[T\s]\d{2}:\d{2}.*)?", testo)
     if m:
         return f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
+    
+    # 2) YYYY-MM-DD semplice
+    m = re.match(r"(\d{4})-(\d{2})-(\d{2})$", testo)
+    if m:
+        return f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
+    
+    # 3) DD/MM/YYYY o DD-MM-YYYY
     m = re.match(r"(\d{1,2})[/\-](\d{1,2})[/\-](\d{2,4})", testo)
     if m:
         g, mes, y = int(m.group(1)), int(m.group(2)), int(m.group(3))
         if y < 100:
-            y += 2000
+            y += 2000 if y < 70 else 1900
         try:
             return date(y, mes, g).isoformat()
         except ValueError:
-            return None
+            pass
+    
+    # 4) DD mese YYYY (es: "18 aprile 2025")
     m = re.search(r"(\d{1,2})\s+([a-z]+)\s+(\d{4})", testo)
     if m:
         g, mese_str, anno = int(m.group(1)), m.group(2)[:3], int(m.group(3))
@@ -48,7 +71,9 @@ def parse_data_it(testo: str) -> str | None:
                     return date(anno, num, g).isoformat()
                 except ValueError:
                     pass
-    m = re.search(r"(\d{1,2})\s+([a-z]+)", testo)
+    
+    # 5) DD mese (senza anno, assume anno corrente)
+    m = re.search(r"(\d{1,2})\s+([a-z]+)$", testo)
     if m:
         g, mese_str = int(m.group(1)), m.group(2)[:3]
         anno = datetime.now().year
@@ -58,6 +83,7 @@ def parse_data_it(testo: str) -> str | None:
                     return date(anno, num, g).isoformat()
                 except ValueError:
                     pass
+    
     return None
 
 
@@ -159,14 +185,18 @@ def scrape_genovatoday(max_pagine: int = 3) -> list[dict]:
             time_el = article.find("time")
             data_raw = ""
             if time_el:
+                # Prova prima con datetime, poi con testo normale
                 data_raw = time_el.get("datetime", "") or time_el.get_text(strip=True)
+            
+            # Parsing della data
+            data_parsata = parse_data_it(data_raw) if data_raw else None
 
             luogo_el = article.find(class_=re.compile(r"location|place|luogo", re.I))
             luogo = luogo_el.get_text(strip=True) if luogo_el else "Genova"
 
             eventi.append({
                 "titolo": titolo,
-                "data": parse_data_it(data_raw) if data_raw else None,
+                "data": data_parsata,
                 "data_raw": data_raw,
                 "luogo": luogo,
                 "url": href,
@@ -174,6 +204,7 @@ def scrape_genovatoday(max_pagine: int = 3) -> list[dict]:
                 "scraped_at": datetime.now().isoformat(),
             })
 
+        # Controlla se c'è pagina successiva
         if not soup.find("a", rel="next"):
             break
 
@@ -182,6 +213,7 @@ def scrape_genovatoday(max_pagine: int = 3) -> list[dict]:
 
 
 def deduplica(eventi: list[dict]) -> list[dict]:
+    """Rimuove eventi duplicati basati su titolo e data"""
     visti = set()
     unici = []
     for e in eventi:
