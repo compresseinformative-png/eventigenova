@@ -68,11 +68,6 @@ def get(url: str) -> BeautifulSoup | None:
 def scrape_genovatoday(filtro: str = None, data_inizio: date = None, data_fine: date = None) -> list[dict]:
     """
     GenovaToday con filtro date via URL
-    Filtri disponibili:
-    - "oggi": eventi di oggi
-    - "domani": eventi di domani  
-    - "weekend": eventi del weekend in corso
-    - oppure data_inizio e data_fine per intervallo
     """
     eventi = []
     
@@ -94,10 +89,8 @@ def scrape_genovatoday(filtro: str = None, data_inizio: date = None, data_fine: 
             sabato = oggi - timedelta(days=oggi.weekday() + 2)
             domenica = sabato + timedelta(days=1)
         url = f"https://www.genovatoday.it/eventi/dal/{sabato.isoformat()}/al/{domenica.isoformat()}/"
-        print(f"  Weekend: {sabato.strftime('%d/%m')} - {domenica.strftime('%d/%m')}")
     elif data_inizio and data_fine:
         url = f"https://www.genovatoday.it/eventi/dal/{data_inizio.isoformat()}/al/{data_fine.isoformat()}/"
-        print(f"  Intervallo: {data_inizio.strftime('%d/%m/%Y')} - {data_fine.strftime('%d/%m/%Y')}")
     else:
         return eventi
     
@@ -108,6 +101,18 @@ def scrape_genovatoday(filtro: str = None, data_inizio: date = None, data_fine: 
 
     articles = soup.find_all("article")
     
+    # DEBUG: stampa TUTTI i titoli per capire la struttura
+    print(f"  [DEBUG] Trovati {len(articles)} articoli totali")
+    print(f"  [DEBUG] Elenco completo dei titoli:")
+    for i, art in enumerate(articles):
+        titolo_el = art.find(["h2", "h3"])
+        if titolo_el:
+            titolo = titolo_el.get_text(strip=True)[:60]
+            print(f"    {i}: {titolo}")
+        else:
+            print(f"    {i}: [nessun titolo]")
+    
+    # Prendi TUTTI gli articoli per ora
     for article in articles:
         link_el = article.find("a", href=True)
         titolo_el = article.find(["h2", "h3"])
@@ -145,7 +150,6 @@ def scrape_genovatoday(filtro: str = None, data_inizio: date = None, data_fine: 
 
     print(f"  GenovaToday: {len(eventi)} eventi trovati")
     return eventi
-
 
 def main():
     parser = argparse.ArgumentParser()
