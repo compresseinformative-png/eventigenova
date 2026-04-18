@@ -1,27 +1,5 @@
 """
 Bot Telegram — Aggregatore eventi Genova
-========================================
-
-Comandi disponibili:
-  /oggi       → eventi di oggi
-  /domani     → eventi di domani
-  /weekend    → eventi del prossimo weekend
-  /cerca jazz → cerca eventi per parola chiave
-  /aggiorna   → forza un nuovo scraping (solo admin)
-
-Setup:
-  1. Crea un bot su Telegram parlando con @BotFather → ottieni TOKEN
-  2. Scrivi al bot una volta, poi vai su:
-       https://api.telegram.org/bot<TOKEN>/getUpdates
-     e copia il tuo chat_id per ADMIN_CHAT_ID
-  3. Installa dipendenze:
-       pip install python-telegram-bot requests beautifulsoup4 lxml
-  4. Avvia:
-       TOKEN=xxx ADMIN_CHAT_ID=yyy python bot.py
-
-Automazione mattutina:
-  Aggiungere al crontab per digest giornaliero alle 08:00:
-       0 8 * * * TOKEN=xxx ADMIN_CHAT_ID=yyy python /percorso/bot.py --digest
 """
 
 import os
@@ -40,7 +18,6 @@ from telegram.ext import (
     filters,
 )
 
-# importa le funzioni di scraping dal file scraper.py nella stessa cartella
 from scraper import scrape_genovatoday, scrape_mentelocale, deduplica
 
 # --------------------------------------------------------------------------- #
@@ -50,7 +27,7 @@ from scraper import scrape_genovatoday, scrape_mentelocale, deduplica
 TOKEN = os.environ.get("TOKEN", "")
 ADMIN_CHAT_ID = int(os.environ.get("ADMIN_CHAT_ID", "0"))
 CACHE_FILE = Path("eventi_cache.json")
-CACHE_MAX_AGE_ORE = 6  # riscrapiamo solo se il cache è vecchio
+CACHE_MAX_AGE_ORE = 6
 
 logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -65,14 +42,17 @@ log = logging.getLogger(__name__)
 
 def carica_cache() -> list[dict]:
     if not CACHE_FILE.exists():
+        log.info("Cache file non esiste")
         return []
     try:
         data = json.loads(CACHE_FILE.read_text(encoding="utf-8"))
         generato = datetime.fromisoformat(data["generato_il"])
         età = (datetime.now() - generato).total_seconds() / 3600
         if età < CACHE_MAX_AGE_ORE:
-            log.info(f"Cache valida ({età:.1f}h fa), uso quella")
+            log.info(f"Cache valida ({età:.1f}h fa), {len(data['eventi'])} eventi")
             return data["eventi"]
+        else:
+            log.info(f"Cache scaduta ({età:.1f}h fa)")
     except Exception as e:
         log.warning(f"Cache corrotta: {e}")
     return []
@@ -84,6 +64,7 @@ def salva_cache(eventi: list[dict]):
                    ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+    log.info(f"Salvati {len(eventi)} eventi in cache")
 
 
 def get_eventi(force: bool = False) -> list[dict]:
@@ -94,6 +75,12 @@ def get_eventi(force: bool = False) -> list[dict]:
     log.info("Avvio scraping...")
     tutti = deduplica(scrape_genovatoday() + scrape_mentelocale())
     tutti.sort(key=lambda e: e.get("data") or "9999-99-99")
+    
+    # DEBUG: stampa primi 3 eventi con data
+    log.info("Primi 3 eventi scrapati:")
+    for i, e in enumerate(tutti[:3]):
+        log.info(f"  {i+1}. {e['titolo'][:50]}... data={e.get('data')}")
+    
     salva_cache(tutti)
     log.info(f"Scraping completato: {len(tutti)} eventi")
     return tutti
@@ -118,6 +105,8 @@ def fmt_evento(e: dict, num: int | None = None) -> str:
             righe.append(f"📅 {e.get('data_raw', '')}")
     elif e.get("data_raw"):
         righe.append(f"📅 {e['data_raw']}")
+    else:
+        righe.append(f"📅 Data non specificata")
 
     if e.get("luogo") and e["luogo"] != "Genova":
         righe.append(f"📍 {e['luogo']}")
@@ -132,19 +121,30 @@ def fmt_evento(e: dict, num: int | None = None) -> str:
 
 
 def filtra_per_data(eventi: list[dict], target: date) -> list[dict]:
-    return [e for e in eventi if e.get("data") == target.isoformat()]
+    filtrati = [e for e in eventi if e.get("data") == target.isoformat()]
+    log.info(f"Filtro per data {target.isoformat()}: {len(filtrati)} eventi su {len(eventi)} totali")
+    
+    # DEBUG: mostra prime 5 date presenti negli eventi
+    date_presenti = set()
+    for e in eventi[:20]:
+        if e.get("data"):
+            date_presenti.add(e["data"])
+    log.info(f"Prime date presenti nel cache: {sorted(date_presenti)[:5]}")
+    
+    return filtrati
 
 
 def filtra_weekend(eventi: list[dict]) -> list[dict]:
     oggi = date.today()
-    # prossimo sabato e domenica
     giorni_a_sab = (5 - oggi.weekday()) % 7 or 7
     sabato = oggi + timedelta(days=giorni_a_sab)
     domenica = sabato + timedelta(days=1)
-    return [
+    filtrati = [
         e for e in eventi
         if e.get("data") in (sabato.isoformat(), domenica.isoformat())
     ]
+    log.info(f"Weekend ({sabato.isoformat()}, {domenica.isoformat()}): {len(filtrati)} eventi")
+    return filtrati
 
 
 def invia_lista(eventi_filtrati: list[dict], intestazione: str) -> str:
@@ -152,7 +152,7 @@ def invia_lista(eventi_filtrati: list[dict], intestazione: str) -> str:
         return f"{intestazione}\n\n_Nessun evento trovato_ 😔"
 
     parti = [intestazione + "\n"]
-    for i, e in enumerate(eventi_filtrati[:10], 1):  # max 10 per messaggio
+    for i, e in enumerate(eventi_filtrati[:10], 1):
         parti.append(fmt_evento(e, i))
         parti.append("—" * 20)
 
@@ -182,8 +182,13 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def cmd_oggi(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("⏳ Cerco gli eventi di oggi...")
     eventi = get_eventi()
-    filtrati = filtra_per_data(eventi, date.today())
-    testo = invia_lista(filtrati, f"🗓 *Eventi oggi — {date.today().strftime('%d/%m/%Y')}*")
+    log.info(f"Totale eventi in cache: {len(eventi)}")
+    
+    oggi = date.today()
+    filtrati = filtra_per_data(eventi, oggi)
+    
+    testo = invia_lista(filtrati, f"🗓 *Eventi oggi — {oggi.strftime('%d/%m/%Y')}*")
+    log.info(f"Invio risposta con {len(filtrati)} eventi")
     await update.message.reply_text(testo, parse_mode="Markdown", disable_web_page_preview=True)
 
 
@@ -216,7 +221,6 @@ async def cmd_cerca(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         e for e in eventi
         if query in e.get("titolo", "").lower()
         or query in e.get("luogo", "").lower()
-        or query in (e.get("descrizione") or "").lower()
     ]
     testo = invia_lista(filtrati, f"🔍 *Risultati per \"{query}\"*")
     await update.message.reply_text(testo, parse_mode="Markdown", disable_web_page_preview=True)
@@ -238,11 +242,10 @@ async def msg_sconosciuto(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 # --------------------------------------------------------------------------- #
-# Digest mattutino (invocato da cron, non dal polling)
+# Digest mattutino
 # --------------------------------------------------------------------------- #
 
 async def invia_digest():
-    """Invia il digest giornaliero all'admin via Telegram."""
     from telegram import Bot
     bot = Bot(token=TOKEN)
     eventi = get_eventi()
