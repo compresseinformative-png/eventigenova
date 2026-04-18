@@ -10,22 +10,13 @@ Comandi disponibili:
   /cerca jazz        → cerca eventi per parola chiave
   /aggiorna          → forza un nuovo scraping (solo admin)
   /svuota_cache      → svuota la cache e ricarica (solo admin)
-
-Setup:
-  1. Crea un bot su Telegram parlando con @BotFather → ottieni TOKEN
-  2. Scrivi al bot una volta, poi vai su:
-       https://api.telegram.org/bot<TOKEN>/getUpdates
-     e copia il tuo chat_id per ADMIN_CHAT_ID
-  3. Installa dipendenze:
-       pip install python-telegram-bot requests beautifulsoup4 lxml
-  4. Avvia:
-       TOKEN=xxx ADMIN_CHAT_ID=yyy python bot.py
 """
 
 import os
 import json
 import logging
 import argparse
+import re
 from datetime import datetime, date, timedelta
 from pathlib import Path
 
@@ -38,7 +29,7 @@ from telegram.ext import (
     filters,
 )
 
-from scraper import scrape_mentelocale, converti_data_italiana
+from scraper import scrape_mentelocale
 
 # --------------------------------------------------------------------------- #
 # Config
@@ -138,16 +129,13 @@ def get_eventi(filtro: str = None, data_target: date = None, force: bool = False
 # --------------------------------------------------------------------------- #
 
 def fmt_evento_con_immagine(e: dict, num: int) -> str:
-    """Formatta un evento con immagine (per i primi 10)"""
     righe = []
     
-    # Aggiungi l'immagine se presente
     if e.get("immagine"):
         righe.append(f"![Immagine]({e['immagine']})")
     
     righe.append(f"*{num}. {e['titolo']}*")
     
-    # Data
     if e.get("data_inizio") and e.get("data_fine"):
         righe.append(f"📅 Dal {e['data_inizio'].replace('-', '/')} al {e['data_fine'].replace('-', '/')}")
     elif e.get("data_inizio"):
@@ -161,13 +149,10 @@ def fmt_evento_con_immagine(e: dict, num: int) -> str:
     if e.get("url"):
         righe.append(f"[→ Dettagli]({e['url']})")
     
-    righe.append(f"🏷️ {e['fonte']}")
-    
     return "\n".join(righe)
 
 
 def fmt_evento_semplice(e: dict, num: int) -> str:
-    """Formatta un evento senza immagine (per gli altri)"""
     righe = [f"*{num}. {e['titolo']}*"]
     
     if e.get("data_inizio") and e.get("data_fine"):
@@ -187,7 +172,6 @@ def fmt_evento_semplice(e: dict, num: int) -> str:
 
 
 async def invia_lista(update_or_bot, eventi: list[dict], intestazione: str, is_digest: bool = False):
-    """Invia gli eventi: primi 10 con immagine, gli altri semplici"""
     if not eventi:
         if is_digest:
             log.info(f"Digest: nessun evento per {intestazione}")
@@ -195,7 +179,6 @@ async def invia_lista(update_or_bot, eventi: list[dict], intestazione: str, is_d
             await update_or_bot.message.reply_text(f"{intestazione}\n\n_Nessun evento trovato_ 😔")
         return
     
-    # Messaggio di intestazione
     if is_digest:
         bot = update_or_bot
         await bot.send_message(chat_id=ADMIN_CHAT_ID, text=intestazione)
@@ -204,12 +187,10 @@ async def invia_lista(update_or_bot, eventi: list[dict], intestazione: str, is_d
         await update_or_bot.message.reply_text(intestazione)
         send_func = lambda msg: update_or_bot.message.reply_text(msg, parse_mode="Markdown", disable_web_page_preview=True)
     
-    # Primi 10 con immagine (uno per messaggio)
     for i, e in enumerate(eventi[:10], 1):
         messaggio = fmt_evento_con_immagine(e, i)
         await send_func(messaggio)
     
-    # Eventuali altri eventi (dal 11 in poi) in blocchi da 15
     if len(eventi) > 10:
         rimanenti = eventi[10:]
         blocco_size = 15
@@ -272,7 +253,6 @@ async def cmd_data(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     
     data_str = " ".join(ctx.args).strip()
     
-    # Converte DD/MM/YYYY in oggetto date
     m = re.match(r"(\d{1,2})/(\d{1,2})/(\d{4})", data_str)
     if not m:
         await update.message.reply_text(
@@ -310,7 +290,6 @@ async def cmd_cerca(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         eventi = get_eventi(filtro=filtro)
         tutti_eventi.extend(eventi)
     
-    # Deduplica per titolo
     visti = set()
     eventi_unici = []
     for e in tutti_eventi:
@@ -318,7 +297,6 @@ async def cmd_cerca(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             visti.add(e["titolo"])
             eventi_unici.append(e)
     
-    # Filtra per parola chiave
     filtrati = [
         e for e in eventi_unici
         if query in e.get("titolo", "").lower()
