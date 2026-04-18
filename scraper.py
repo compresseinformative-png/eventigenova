@@ -64,7 +64,7 @@ def get(url: str) -> BeautifulSoup | None:
         print(f"  [ERRORE] {url} -> {e}")
         return None
 
-def scrape_genovatoday(filtro: str = None, data_inizio: date = None, data_fine: date = None) -> list[dict]:
+def scrape_genovatoday(filtro: str = None) -> list[dict]:
     """
     GenovaToday con filtro date via URL
     """
@@ -87,9 +87,9 @@ def scrape_genovatoday(filtro: str = None, data_inizio: date = None, data_fine: 
         else:
             sabato = oggi - timedelta(days=oggi.weekday() + 2)
             domenica = sabato + timedelta(days=1)
+        
         url = f"https://www.genovatoday.it/eventi/dal/{sabato.isoformat()}/al/{domenica.isoformat()}/"
-    elif data_inizio and data_fine:
-        url = f"https://www.genovatoday.it/eventi/dal/{data_inizio.isoformat()}/al/{data_fine.isoformat()}/"
+        print(f"  Weekend: {sabato.strftime('%d/%m')} - {domenica.strftime('%d/%m')}")
     else:
         return eventi
     
@@ -100,13 +100,14 @@ def scrape_genovatoday(filtro: str = None, data_inizio: date = None, data_fine: 
 
     articles = soup.find_all("article")
     
-    # Salta i primi 2 articoli (quelli promozionali) SOLO se ci sono abbastanza articoli
-    if len(articles) > 2:
-        articles = articles[2:]
-        print(f"  Saltati i primi 2 articoli promozionali, rimangono {len(articles)} articoli")
-    else:
-        print(f"  Solo {len(articles)} articoli trovati, nessuno saltato")
+    # DEBUG: stampa quanti articoli trova e i primi titoli
+    print(f"  [DEBUG] Trovati {len(articles)} articoli")
+    for i, art in enumerate(articles[:5]):
+        titolo_el = art.find(["h2", "h3"])
+        if titolo_el:
+            print(f"  [DEBUG] Articolo {i}: {titolo_el.get_text(strip=True)[:50]}")
     
+    # Prendi TUTTI gli articoli per ora (senza saltare)
     for article in articles:
         link_el = article.find("a", href=True)
         titolo_el = article.find(["h2", "h3"])
