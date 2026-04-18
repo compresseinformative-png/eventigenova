@@ -107,15 +107,17 @@ def get_eventi(force: bool = False) -> list[dict]:
     
     log.info("Avvio scraping...")
     tutti = deduplica(scrape_genovatoday() + scrape_mentelocale())
-    tutti.sort(key=lambda e: e.get("data") or "9999-99-99")
+    tutti.sort(key=lambda e: e.get("data_inizio") or e.get("data") or "9999-99-99")
     
     # DEBUG: stampa primi 5 eventi con data
     log.info("Primi 5 eventi scrapati:")
     for i, e in enumerate(tutti[:5]):
-        log.info(f"  {i+1}. {e['titolo'][:50]}... data={e.get('data')}, raw={e.get('data_raw', '')[:30]}")
+        data_inizio = e.get('data_inizio') or e.get('data')
+        data_fine = e.get('data_fine')
+        log.info(f"  {i+1}. {e['titolo'][:50]}... inizio={data_inizio}, fine={data_fine}")
     
     # Conta quanti eventi hanno una data valida
-    con_data = sum(1 for e in tutti if e.get('data'))
+    con_data = sum(1 for e in tutti if e.get('data_inizio') or e.get('data'))
     log.info(f"Eventi con data valida: {con_data}/{len(tutti)}")
     
     salva_cache(tutti)
@@ -134,12 +136,23 @@ def fmt_evento(e: dict, num: int | None = None) -> str:
     else:
         righe.append(f"*{e['titolo']}*")
 
-    if e.get("data"):
+    # Gestione data con intervallo
+    data_inizio = e.get('data_inizio') or e.get('data')
+    data_fine = e.get('data_fine')
+    
+    if data_inizio and data_fine:
         try:
-            d = date.fromisoformat(e["data"])
+            d_inizio = date.fromisoformat(data_inizio)
+            d_fine = date.fromisoformat(data_fine)
+            righe.append(f"📅 Dal {d_inizio.strftime('%d/%m/%Y')} al {d_fine.strftime('%d/%m/%Y')}")
+        except ValueError:
+            righe.append(f"📅 Dal {data_inizio} al {data_fine}")
+    elif data_inizio:
+        try:
+            d = date.fromisoformat(data_inizio)
             righe.append(f"📅 {d.strftime('%A %d %B').capitalize()}")
         except ValueError:
-            righe.append(f"📅 {e.get('data_raw', '')}")
+            righe.append(f"📅 {data_inizio}")
     elif e.get("data_raw"):
         righe.append(f"📅 {e['data_raw']}")
     else:
@@ -158,32 +171,60 @@ def fmt_evento(e: dict, num: int | None = None) -> str:
 
 
 def filtra_per_data(eventi: list[dict], target: date) -> list[dict]:
+    """
+    Filtra eventi che sono attivi nella data target.
+    Gestisce sia eventi con data singola che con intervallo.
+    """
     target_str = target.isoformat()
-    filtrati = [e for e in eventi if e.get("data") == target_str]
+    filtrati = []
+    
+    for e in eventi:
+        data_inizio = e.get("data_inizio") or e.get("data")
+        data_fine = e.get("data_fine")
+        
+        if data_inizio and data_fine:
+            # Evento con intervallo di date
+            if data_inizio <= target_str <= data_fine:
+                filtrati.append(e)
+        elif data_inizio:
+            # Evento con data singola
+            if data_inizio == target_str:
+                filtrati.append(e)
+    
     log.info(f"Filtro per data {target_str}: {len(filtrati)} eventi su {len(eventi)} totali")
     
-    # DEBUG: mostra prime 10 date presenti negli eventi
-    date_presenti = {}
-    for e in eventi:
-        if e.get("data"):
-            date_presenti[e["data"]] = date_presenti.get(e["data"], 0) + 1
-    
-    if date_presenti:
-        log.info(f"Date presenti nel cache (prime 5): {list(date_presenti.items())[:5]}")
+    # DEBUG: mostra alcune date di esempio
+    if filtrati:
+        log.info(f"Primi eventi filtrati: {[(e.get('titolo', '')[:30], e.get('data_inizio'), e.get('data_fine')) for e in filtrati[:3]]}")
     
     return filtrati
 
 
 def filtra_weekend(eventi: list[dict]) -> list[dict]:
+    """Filtra eventi che cadono nel prossimo weekend (sabato o domenica)"""
     oggi = date.today()
     giorni_a_sab = (5 - oggi.weekday()) % 7 or 7
     sabato = oggi + timedelta(days=giorni_a_sab)
     domenica = sabato + timedelta(days=1)
-    filtrati = [
-        e for e in eventi
-        if e.get("data") in (sabato.isoformat(), domenica.isoformat())
-    ]
-    log.info(f"Weekend ({sabato.isoformat()}, {domenica.isoformat()}): {len(filtrati)} eventi")
+    
+    sabato_str = sabato.isoformat()
+    domenica_str = domenica.isoformat()
+    
+    filtrati = []
+    for e in eventi:
+        data_inizio = e.get("data_inizio") or e.get("data")
+        data_fine = e.get("data_fine")
+        
+        if data_inizio and data_fine:
+            # Verifica se l'intervallo copre sabato o domenica
+            if (data_inizio <= sabato_str <= data_fine) or (data_inizio <= domenica_str <= data_fine):
+                filtrati.append(e)
+        elif data_inizio:
+            # Data singola
+            if data_inizio in (sabato_str, domenica_str):
+                filtrati.append(e)
+    
+    log.info(f"Weekend ({sabato_str}, {domenica_str}): {len(filtrati)} eventi")
     return filtrati
 
 

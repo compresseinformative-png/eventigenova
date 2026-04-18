@@ -7,7 +7,7 @@ import requests
 import json
 import argparse
 import re
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from bs4 import BeautifulSoup
 
 HEADERS = {
@@ -28,40 +28,36 @@ MESI_IT = {
 def parse_data_it(testo: str) -> str | None:
     """
     Parsa date in vari formati italiani e ISO, restituisce YYYY-MM-DD
-    Supporta:
-    - 2025-04-18T10:00:00+02:00 (ISO con timezone)
-    - 2025-04-18
-    - 18/04/2025 o 18-04-2025
-    - 18 aprile 2025
-    - 18 aprile (assume anno corrente)
     """
     if not testo:
         return None
     
     testo = testo.strip()
     
-    # 1) ISO completo con timezone: 2025-04-18T10:00:00+02:00 o 2025-04-18 10:00
+    # 1) ISO completo con timezone: 2025-04-18T10:00:00+02:00
     m = re.match(r"(\d{4})-(\d{2})-(\d{2})(?:[T\s]\d{2}:\d{2}.*)?", testo)
     if m:
         return f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
     
-    # 2) YYYY-MM-DD semplice
-    m = re.match(r"(\d{4})-(\d{2})-(\d{2})$", testo)
-    if m:
-        return f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
-    
-    # 3) DD/MM/YYYY o DD-MM-YYYY
-    m = re.match(r"(\d{1,2})[/\-](\d{1,2})[/\-](\d{2,4})", testo)
+    # 2) DD/MM/YYYY
+    m = re.match(r"(\d{1,2})/(\d{1,2})/(\d{4})", testo)
     if m:
         g, mes, y = int(m.group(1)), int(m.group(2)), int(m.group(3))
-        if y < 100:
-            y += 2000 if y < 70 else 1900
         try:
             return date(y, mes, g).isoformat()
         except ValueError:
             pass
     
-    # 4) DD mese YYYY (es: "18 aprile 2025")
+    # 3) DD-MM-YYYY
+    m = re.match(r"(\d{1,2})-(\d{1,2})-(\d{4})", testo)
+    if m:
+        g, mes, y = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        try:
+            return date(y, mes, g).isoformat()
+        except ValueError:
+            pass
+    
+    # 4) DD mese YYYY
     m = re.search(r"(\d{1,2})\s+([a-z]+)\s+(\d{4})", testo)
     if m:
         g, mese_str, anno = int(m.group(1)), m.group(2)[:3], int(m.group(3))
@@ -72,19 +68,43 @@ def parse_data_it(testo: str) -> str | None:
                 except ValueError:
                     pass
     
-    # 5) DD mese (senza anno, assume anno corrente)
-    m = re.search(r"(\d{1,2})\s+([a-z]+)$", testo)
-    if m:
-        g, mese_str = int(m.group(1)), m.group(2)[:3]
-        anno = datetime.now().year
-        for nome, num in MESI_IT.items():
-            if nome.startswith(mese_str):
-                try:
-                    return date(anno, num, g).isoformat()
-                except ValueError:
-                    pass
-    
     return None
+
+
+def parse_intervallo_data(testo: str) -> tuple[str | None, str | None]:
+    """
+    Parsa intervalli di date come "Dal 10/04/2026 al 20/04/2026"
+    Restituisce (data_inizio, data_fine) in formato YYYY-MM-DD
+    """
+    if not testo:
+        return None, None
+    
+    # Pattern per "Dal DD/MM/YYYY al DD/MM/YYYY"
+    pattern = r"[Dd]al\s+(\d{1,2}/\d{1,2}/\d{4})\s+[Aa]l\s+(\d{1,2}/\d{1,2}/\d{4})"
+    m = re.search(pattern, testo)
+    if m:
+        inizio = parse_data_it(m.group(1))
+        fine = parse_data_it(m.group(2))
+        return inizio, fine
+    
+    # Pattern per "Dal DD/MM/YYYY"
+    pattern_singolo = r"[Dd]al\s+(\d{1,2}/\d{1,2}/\d{4})"
+    m = re.search(pattern_singolo, testo)
+    if m:
+        return parse_data_it(m.group(1)), None
+    
+    return None, None
+
+
+def data_in_intervallo(data: str, inizio: str | None, fine: str | None) -> bool:
+    """Verifica se una data è compresa nell'intervallo"""
+    if not data or not inizio:
+        return False
+    
+    if fine:
+        return inizio <= data <= fine
+    else:
+        return data == inizio
 
 
 def get(url: str) -> BeautifulSoup | None:
@@ -109,8 +129,6 @@ def scrape_mentelocale() -> list[dict]:
     if not soup:
         return eventi
 
-    data_pattern = re.compile(r"[Dd]al\s+(\d{1,2}/\d{1,2}/\d{4})")
-
     # Ogni evento e' un link a /genova/NUMERO-titolo.htm
     seen_urls = set()
     for a in soup.find_all("a", href=re.compile(r"/genova/\d+-.+\.htm")):
@@ -131,17 +149,17 @@ def scrape_mentelocale() -> list[dict]:
         for _ in range(5):
             if parent:
                 testo = parent.get_text(" ", strip=True)
-                if data_pattern.search(testo):
-                    break
                 parent = parent.parent
 
-        m = data_pattern.search(testo)
-        data_iso = parse_data_it(m.group(1)) if m else None
+        # Parsa intervallo date
+        data_inizio, data_fine = parse_intervallo_data(testo)
 
         eventi.append({
             "titolo": titolo,
-            "data": data_iso,
-            "data_raw": m.group(0) if m else "",
+            "data": data_inizio,  # per compatibilità
+            "data_inizio": data_inizio,
+            "data_fine": data_fine,
+            "data_raw": testo[:100] if testo else "",
             "luogo": "Genova",
             "url": href,
             "fonte": "mentelocale.it",
@@ -185,10 +203,8 @@ def scrape_genovatoday(max_pagine: int = 3) -> list[dict]:
             time_el = article.find("time")
             data_raw = ""
             if time_el:
-                # Prova prima con datetime, poi con testo normale
                 data_raw = time_el.get("datetime", "") or time_el.get_text(strip=True)
             
-            # Parsing della data
             data_parsata = parse_data_it(data_raw) if data_raw else None
 
             luogo_el = article.find(class_=re.compile(r"location|place|luogo", re.I))
@@ -197,6 +213,8 @@ def scrape_genovatoday(max_pagine: int = 3) -> list[dict]:
             eventi.append({
                 "titolo": titolo,
                 "data": data_parsata,
+                "data_inizio": data_parsata,
+                "data_fine": None,
                 "data_raw": data_raw,
                 "luogo": luogo,
                 "url": href,
@@ -204,7 +222,6 @@ def scrape_genovatoday(max_pagine: int = 3) -> list[dict]:
                 "scraped_at": datetime.now().isoformat(),
             })
 
-        # Controlla se c'è pagina successiva
         if not soup.find("a", rel="next"):
             break
 
@@ -213,11 +230,10 @@ def scrape_genovatoday(max_pagine: int = 3) -> list[dict]:
 
 
 def deduplica(eventi: list[dict]) -> list[dict]:
-    """Rimuove eventi duplicati basati su titolo e data"""
     visti = set()
     unici = []
     for e in eventi:
-        chiave = (re.sub(r"\s+", " ", e["titolo"].lower().strip())[:60], e.get("data") or "")
+        chiave = (re.sub(r"\s+", " ", e["titolo"].lower().strip())[:60], e.get("data_inizio") or "")
         if chiave not in visti:
             visti.add(chiave)
             unici.append(e)
@@ -240,7 +256,7 @@ def main():
         tutti.extend(scrape_mentelocale())
 
     tutti = deduplica(tutti)
-    tutti.sort(key=lambda e: e.get("data") or "9999-99-99")
+    tutti.sort(key=lambda e: e.get("data_inizio") or "9999-99-99")
 
     risultato = {"generato_il": datetime.now().isoformat(), "totale": len(tutti), "eventi": tutti}
 
