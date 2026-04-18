@@ -64,7 +64,7 @@ def get(url: str) -> BeautifulSoup | None:
         print(f"  [ERRORE] {url} -> {e}")
         return None
 
-def scrape_genovatoday(filtro: str = None) -> list[dict]:
+def scrape_genovatoday(filtro: str = None, data_inizio: date = None, data_fine: date = None) -> list[dict]:
     """
     GenovaToday con filtro date via URL
     """
@@ -87,9 +87,9 @@ def scrape_genovatoday(filtro: str = None) -> list[dict]:
         else:
             sabato = oggi - timedelta(days=oggi.weekday() + 2)
             domenica = sabato + timedelta(days=1)
-        
         url = f"https://www.genovatoday.it/eventi/dal/{sabato.isoformat()}/al/{domenica.isoformat()}/"
-        print(f"  Weekend: {sabato.strftime('%d/%m')} - {domenica.strftime('%d/%m')}")
+    elif data_inizio and data_fine:
+        url = f"https://www.genovatoday.it/eventi/dal/{data_inizio.isoformat()}/al/{data_fine.isoformat()}/"
     else:
         return eventi
     
@@ -100,14 +100,6 @@ def scrape_genovatoday(filtro: str = None) -> list[dict]:
 
     articles = soup.find_all("article")
     
-    # DEBUG: stampa quanti articoli trova e i primi titoli
-    print(f"  [DEBUG] Trovati {len(articles)} articoli")
-    for i, art in enumerate(articles[:5]):
-        titolo_el = art.find(["h2", "h3"])
-        if titolo_el:
-            print(f"  [DEBUG] Articolo {i}: {titolo_el.get_text(strip=True)[:50]}")
-    
-    # Prendi TUTTI gli articoli per ora (senza saltare)
     for article in articles:
         link_el = article.find("a", href=True)
         titolo_el = article.find(["h2", "h3"])
@@ -115,13 +107,18 @@ def scrape_genovatoday(filtro: str = None) -> list[dict]:
         if not link_el or not titolo_el:
             continue
         
-        titolo = titolo_el.get_text(strip=True)
-        if not titolo or len(titolo) < 5:
-            continue
-        
         href = link_el["href"]
         if not href.startswith("http"):
             href = "https://www.genovatoday.it" + href
+        
+        # *** FILTRO CHIAVE: prendi solo i link che puntano a /eventi/ ***
+        if not href.startswith("https://www.genovatoday.it/eventi/"):
+            print(f"  [SKIP] Link escluso (non è un evento): {href[:80]}")
+            continue
+        
+        titolo = titolo_el.get_text(strip=True)
+        if not titolo or len(titolo) < 5:
+            continue
         
         time_el = article.find("time")
         data_raw = ""
