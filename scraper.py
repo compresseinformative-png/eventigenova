@@ -64,7 +64,6 @@ def get(url: str) -> BeautifulSoup | None:
         print(f"  [ERRORE] {url} -> {e}")
         return None
 
-
 def scrape_genovatoday(filtro: str = None, data_inizio: date = None, data_fine: date = None) -> list[dict]:
     """
     GenovaToday con filtro date via URL
@@ -101,18 +100,13 @@ def scrape_genovatoday(filtro: str = None, data_inizio: date = None, data_fine: 
 
     articles = soup.find_all("article")
     
-    # DEBUG: stampa TUTTI i titoli per capire la struttura
-    print(f"  [DEBUG] Trovati {len(articles)} articoli totali")
-    print(f"  [DEBUG] Elenco completo dei titoli:")
-    for i, art in enumerate(articles):
-        titolo_el = art.find(["h2", "h3"])
-        if titolo_el:
-            titolo = titolo_el.get_text(strip=True)[:60]
-            print(f"    {i}: {titolo}")
-        else:
-            print(f"    {i}: [nessun titolo]")
+    # Salta i primi 2 articoli (quelli promozionali) SOLO se ci sono abbastanza articoli
+    if len(articles) > 2:
+        articles = articles[2:]
+        print(f"  Saltati i primi 2 articoli promozionali, rimangono {len(articles)} articoli")
+    else:
+        print(f"  Solo {len(articles)} articoli trovati, nessuno saltato")
     
-    # Prendi TUTTI gli articoli per ora
     for article in articles:
         link_el = article.find("a", href=True)
         titolo_el = article.find(["h2", "h3"])
@@ -150,7 +144,6 @@ def scrape_genovatoday(filtro: str = None, data_inizio: date = None, data_fine: 
 
     print(f"  GenovaToday: {len(eventi)} eventi trovati")
     return eventi
-
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--filtro", choices=["oggi", "domani", "weekend"], default=None)
